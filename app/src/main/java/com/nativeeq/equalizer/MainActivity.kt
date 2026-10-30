@@ -159,9 +159,10 @@ class MainActivity : Activity() {
         ui.npuToggleBtn.setOnClickListener {
             it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
             isNpuAutoMode = !isNpuAutoMode
-            ui.npuToggleBtn.text = if (isNpuAutoMode) "AUTO-ENHANCE: ON" else "AUTO-ENHANCE: OFF"
-            ui.npuToggleBtn.setBackgroundColor(
-                Color.parseColor(if (isNpuAutoMode) "#0284c7" else "#1e293b")
+            ui.npuToggleBtn.text = if (isNpuAutoMode) "Auto: on" else "Auto: off"
+            ui.styleButton(
+                ui.npuToggleBtn,
+                if (isNpuAutoMode) "#0284c7" else "#1e293b", Color.WHITE
             )
         }
         ui.resetBtn.setOnClickListener {
@@ -192,14 +193,13 @@ class MainActivity : Activity() {
                         )
                     }
                 }
-                ui.modelStatusLabel.text = "DOWNLOADING GEMMA…"
+                ui.modelStatusLabel.text = "Downloading Gemma…"
             }
         }
         ui.analyzeBtn.setOnClickListener {
             it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
             runLmSessionInference()
         }
-        ui.heatmapBtn.text = "LOGBOOK"
         ui.heatmapBtn.setOnClickListener {
             it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
             appendLog(dbHelper.generateAsciiHeatmap())
@@ -420,8 +420,8 @@ class MainActivity : Activity() {
     private fun refreshModelStatus() {
         ui.modelStatusLabel.text = lmEngine.getModelManager().statusText()
         ui.modelBtn.text =
-            if (lmEngine.getModelManager().isModelPresent()) "MODEL READY ✓"
-            else "GET GEMMA MODEL (584 MB)"
+            if (lmEngine.getModelManager().isModelPresent()) "Model ready ✓"
+            else "Get Gemma model (584 MB)"
     }
 
     private fun runLmSessionInference() {
@@ -539,8 +539,10 @@ class MainActivity : Activity() {
             val isSet = (1 shl bitIndex) and safeState != 0
             val btn = ui.bitButtons[i]
             btn.text = "B$bitIndex\n${if (isSet) "1" else "0"}"
-            btn.setBackgroundColor(Color.parseColor(if (isSet) "#00ff66" else "#1f2937"))
-            btn.setTextColor(if (isSet) Color.BLACK else Color.parseColor("#9ca3af"))
+            ui.styleButton(
+                btn, if (isSet) "#00ff66" else "#1f2937",
+                if (isSet) Color.BLACK else Color.parseColor("#9ca3af")
+            )
         }
         if (!isNpuAutoMode) {
             EqualizerService.profiles.getOrNull(safeState)?.let {
