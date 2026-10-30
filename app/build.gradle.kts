@@ -22,6 +22,14 @@ android {
         }
     }
 
+    flavorDimensions += "dist"
+    productFlavors {
+        // full = GitHub/Obtainium build incl. ML Kit genai-prompt (proprietary)
+        // foss = F-Droid build, zero non-free deps (Nano backend stubbed out)
+        create("full")
+        create("foss")
+    }
+
     signingConfigs {
         create("release") {
             storeFile = file(releaseStorePath)
@@ -71,7 +79,7 @@ android {
 
 dependencies {
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.1")
-    implementation("com.google.mlkit:genai-prompt:1.0.0-beta4")
+    "fullImplementation"("com.google.mlkit:genai-prompt:1.0.0-beta4")
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }

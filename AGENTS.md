@@ -20,8 +20,13 @@ Build on ext4, not /storage/emulated.
 
 Repo: github.com/indodankabis/nativeeq. Keystore: ~/.keystores/ (NEVER commit;
 creds in ~/.keystores/nativeeq.env — source it for local release builds).
-CI: tag push `v*` → .github/workflows/release.yml → equalizer-release.apk on
-GitHub Releases. Ship with `ship v1.0.0` (alias in ~/.bash_aliases → ./ship.sh).
+CI: tag push `v*` → .github/workflows/release.yml → equalizer-release.apk +
+equalizer-foss.apk on GitHub Releases. Ship with `ship v1.0.0` (alias in
+~/.bash_aliases → ./ship.sh).
+
+Flavors (`dist` dimension): `full` = GitHub build with ML Kit genai-prompt
+(Gemini Nano); `foss` = F-Droid build, NanoBackend stubbed, zero non-free deps.
+Tasks: `:app:assembleFullRelease`, `:app:assembleFossRelease` (and *Debug).
 
 ## AI backend chain (LiteRtLmAcousticEngine.kt)
 

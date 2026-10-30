@@ -54,12 +54,14 @@ jobs:
           EQ_KEY_PASSWORD: ${{ secrets.EQ_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleRelease --no-daemon --console=plain
+          ./gradlew :app:assembleFullRelease :app:assembleFossRelease \
+            --no-daemon --console=plain
 
       - name: Stage + verify APK
         run: |
-          cp app/build/outputs/apk/release/app-release.apk equalizer-release.apk
-          sha256sum equalizer-release.apk > SHA256SUMS.txt
+          cp app/build/outputs/apk/full/release/app-full-release.apk equalizer-release.apk
+          cp app/build/outputs/apk/foss/release/app-foss-release.apk equalizer-foss.apk
+          sha256sum equalizer-release.apk equalizer-foss.apk > SHA256SUMS.txt
           APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
           "$APKSIGNER" verify --print-certs equalizer-release.apk | head -6
 
@@ -68,8 +70,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          SHA=$(cut -d' ' -f1 SHA256SUMS.txt)
-          gh release create "$TAG" equalizer-release.apk SHA256SUMS.txt \
+          SHA=$(grep equalizer-release.apk SHA256SUMS.txt | cut -d' ' -f1)
+          gh release create "$TAG" equalizer-release.apk equalizer-foss.apk SHA256SUMS.txt \
             --title "NativeEQ $TAG" \
             --latest \
             --notes "$(printf "arm64-v8a signed release (v1+v2+v3 schemes). Install or auto-update via Obtainium.\n\nSHA-256: %s\n\nSupport development: https://ko-fi.com/indodankabis\n" "$SHA")"

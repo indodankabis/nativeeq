@@ -164,47 +164,10 @@ class LiteRtLmAcousticEngine(private val context: Context) {
         }
     }
 
-    private fun runNanoPrompt(prompt: String, onToken: (String) -> Unit): LmResponse? {
-        return try {
-            runBlocking {
-                val model = com.google.mlkit.genai.prompt.Generation.getClient()
-                try {
-                    val status = model.checkStatus()
-                    if (status != com.google.mlkit.genai.common.FeatureStatus.AVAILABLE) {
-                        onToken("[GEMINI-NANO] not available on this device (status=$status)")
-                        return@runBlocking null
-                    }
-                    onToken("[GEMINI-NANO] AICore model ready — generating…")
-                    val sb = StringBuilder()
-                    val request =
-                        com.google.mlkit.genai.prompt.GenerateContentRequest.Builder(
-                            com.google.mlkit.genai.prompt.TextPart(prompt + RESPONSE_CONTRACT)
-                        ).apply {
-                            temperature = 0.2f
-                            maxOutputTokens = 256
-                        }.build()
-                    model.generateContent(
-                        request,
-                        object : com.google.mlkit.genai.common.StreamingCallback {
-                            override fun onNewText(text: String) {
-                                sb.append(text)
-                                onToken(text)
-                            }
-                        },
-                    )
-                    parseLmOutput(sb.toString(), "GEMINI-NANO")
-                } finally {
-                    try {
-                        model.close()
-                    } catch (_: Throwable) {
-                    }
-                }
-            }
-        } catch (e: Throwable) {
-            onToken("[GEMINI-NANO] unavailable: ${e.message?.take(60)}")
-            null
-        }
-    }
+    // Gemini Nano backend lives in flavor source sets: src/full has the real
+    // genai-prompt client, src/foss a stub (ML Kit is proprietary — F-Droid).
+    private fun runNanoPrompt(prompt: String, onToken: (String) -> Unit): LmResponse? =
+        NanoBackend.run(prompt, onToken, ::parseLmOutput)
 
     private fun messageText(message: com.google.ai.edge.litertlm.Message): String {
         return try {
@@ -278,7 +241,7 @@ compressionAlerts=${summary.compressionAlerts}, route=$routeKey.
 Suggest corrective gains. Return ONLY a JSON object.""".trimIndent()
 
     companion object {
-        private const val RESPONSE_CONTRACT =
+        internal const val RESPONSE_CONTRACT =
             """ Respond with exactly one JSON object, no markdown:
 {"gains_mb":[b0,b1,b2,b3,b4],"reasoning":"one sentence"}"""
     }
