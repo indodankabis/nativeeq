@@ -14,8 +14,8 @@ import android.media.audiofx.Virtualizer
 import android.media.audiofx.Visualizer
 import android.os.Binder
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
-import android.os.Looper
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import kotlin.math.abs
@@ -97,7 +97,13 @@ class EqualizerService : Service() {
     private var isMorphing = false
     private val morphAlpha = 0.22f
     private val frameIntervalMs = 16L
-    private val morphHandler = Handler(Looper.getMainLooper())
+    // DSP work runs on its own thread — the morph loop does JNI writes into
+    // audio effects every 16ms and session sync shells out to `dumpsys audio`;
+    // neither belongs on the main looper.
+    private val dspThread = HandlerThread("eq_dsp").apply { start() }
+    private val morphHandler = Handler(dspThread.looper)
+    private var sessionSyncPending = false
+    private var isForegroundStarted = false
 
     private val dbHelper by lazy { TelemetryDbHelper(this) }
     private val binder = LocalBinder()
@@ -190,7 +196,18 @@ class EqualizerService : Service() {
     /**
      * Per-session attach: mirror the global DP onto every live audio session
      * found in `dumpsys audio` (needs the DUMP development permission).
+     * Runs on the DSP thread, debounced — dumpsys is a fork+exec+parse and
+     * startService arrives per UI action.
      */
+    private fun scheduleSessionSync() {
+        if (sessionSyncPending) return
+        sessionSyncPending = true
+        morphHandler.postDelayed({
+            sessionSyncPending = false
+            syncSessionEffects()
+        }, 1500)
+    }
+
     private fun syncSessionEffects() {
         val map = sessionDps ?: return
         val config = dspConfig ?: return
@@ -295,6 +312,8 @@ class EqualizerService : Service() {
     }
 
     private fun promoteToForeground() {
+        if (isForegroundStarted) return
+        isForegroundStarted = true
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(
@@ -337,7 +356,7 @@ class EqualizerService : Service() {
         promoteToForeground()
         initDspEffects()
         startAudioCapture()
-        syncSessionEffects()
+        scheduleSessionSync()
         when (intent?.action) {
             ACTION_SET_BASS -> {
                 val strength = intent.getShortExtra(EXTRA_BASS_STRENGTH, 0)
@@ -433,6 +452,7 @@ class EqualizerService : Service() {
         super.onDestroy()
         try {
             morphHandler.removeCallbacks(morphRunnable)
+            dspThread.quitSafely()
             visualizer?.release()
             dynamicsProcessing?.release()
             bassBoost?.release()

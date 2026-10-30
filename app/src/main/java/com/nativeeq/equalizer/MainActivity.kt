@@ -38,6 +38,9 @@ class MainActivity : Activity() {
     private var recommendedGains: ShortArray? = null
     private var currentRoute = "dev_internal"
     private var sweepRunning = false
+    private var lastTelemetryUiMs = 0L
+    private var lastMicUiMs = 0L
+    private var lastAgentUiMs = 0L
 
     private val terminalLines = LinkedList<String>()
     private val maxLogLines = 9
@@ -63,26 +66,32 @@ class MainActivity : Activity() {
                 ui.statusLabel.text = "LOADED SQLITE PROFILE | ROUTE: $currentRoute"
             }
             EqualizerService.onTelemetryListener = { low, med, high ->
-                runOnUiThread {
-                    ui.matrixVisualizer.updateSpectralBands(low, med, high)
-                    DirectAcousticBus.writeRawTriplet(low, med, high)
-                    ui.visualizerView.updateSpectralTriplet(low, med, high)
-                    transferEngine.updateRawTriplet(low, med, high)
-                    genreClassifier.ingestFrame(low, med, high)?.let { archetype ->
-                        npuAgent?.genreBiasMb = archetype.eqBiasMb
-                        if (isNpuAutoMode) {
-                            eqService?.updateMbcEnvelope(
-                                archetype.attackMs, archetype.releaseMs,
-                                archetype.ratio, archetype.thresholdDb
-                            )
-                        }
-                        appendLog(
-                            "[MBC KNEE] ${archetype.label} -> " +
-                                "${archetype.attackMs.toInt()}ms/${archetype.ratio}:1"
+                // Runs on the Visualizer callback thread ~10-20Hz.
+                // DSP/classifier work stays off-UI; view repaints throttled.
+                DirectAcousticBus.writeRawTriplet(low, med, high)
+                npuAgent?.pushSpectralFrame(low, med, high)
+                genreClassifier.ingestFrame(low, med, high)?.let { archetype ->
+                    npuAgent?.genreBiasMb = archetype.eqBiasMb
+                    if (isNpuAutoMode) {
+                        eqService?.updateMbcEnvelope(
+                            archetype.attackMs, archetype.releaseMs,
+                            archetype.ratio, archetype.thresholdDb
                         )
                     }
+                    appendLog(
+                        "[MBC KNEE] ${archetype.label} -> " +
+                            "${archetype.attackMs.toInt()}ms/${archetype.ratio}:1"
+                    )
                 }
-                npuAgent?.pushSpectralFrame(low, med, high)
+                transferEngine.updateRawTriplet(low, med, high)
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - lastTelemetryUiMs >= 100) {
+                    lastTelemetryUiMs = now
+                    runOnUiThread {
+                        ui.matrixVisualizer.updateSpectralBands(low, med, high)
+                        ui.visualizerView.updateSpectralTriplet(low, med, high)
+                    }
+                }
             }
         }
 
@@ -300,17 +309,23 @@ class MainActivity : Activity() {
         if (snapshotTick % 4 == 0) {
             dbHelper.insertSnapshot(currentRoute, low, med, high, gains)
         }
-        runOnUiThread {
-            ui.npuStatusLabel.text = msg
-            appendLog(logLine)
-            blinkState = !blinkState
-            val us = DirectAcousticBus.readMicBands(FloatArray(5))
-            ui.crtHeader.text =
-                (if (blinkState) "[●]" else "[○]") +
-                    " --- [ DIRECT-BUS: ${us}µs | GOERTZEL RTA ] ---"
-            if (isNpuAutoMode) {
-                ui.visualizerView.setTargetGains(gains)
-                eqService?.setTargetGains(gains)
+        if (isNpuAutoMode) {
+            eqService?.setTargetGains(gains)
+        }
+        appendLog(logLine)
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastAgentUiMs >= 150) {
+            lastAgentUiMs = now
+            runOnUiThread {
+                ui.npuStatusLabel.text = msg
+                blinkState = !blinkState
+                val us = DirectAcousticBus.readMicBands(FloatArray(5))
+                ui.crtHeader.text =
+                    (if (blinkState) "[●]" else "[○]") +
+                        " --- [ DIRECT-BUS: ${us}µs | GOERTZEL RTA ] ---"
+                if (isNpuAutoMode) {
+                    ui.visualizerView.setTargetGains(gains)
+                }
             }
         }
     }
@@ -392,21 +407,26 @@ class MainActivity : Activity() {
         startForegroundService(serviceIntent)
         bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
         micAnalyzer.onMicBandsListener = { bands ->
+            // Mic RTA thread ~28Hz — DSP updates off-UI, repaints throttled.
             val micLow = (bands[0] + bands[1]) * 0.5f
             val micMed = bands[2]
             val micHigh = 0.5f * (bands[3] + bands[4])
-            runOnUiThread {
-                ui.visualizerView.updateMicBands(bands)
-                val tf = transferEngine.evaluateTransfer(bands)
-                npuAgent?.transferCompMb = tf.compensationMb
-                npuAgent?.transferTag = tf.summaryTag
-                if (micLow + micMed + micHigh > 0.03f) {
-                    ui.matrixVisualizer.updateSpectralBands(micLow, micMed, micHigh)
-                    ui.visualizerView.updateSpectralTriplet(micLow, micMed, micHigh)
-                }
-            }
+            val tf = transferEngine.evaluateTransfer(bands)
+            npuAgent?.transferCompMb = tf.compensationMb
+            npuAgent?.transferTag = tf.summaryTag
             if (micLow + micMed + micHigh > 0.03f) {
                 npuAgent?.pushSpectralFrame(micLow, micMed, micHigh)
+            }
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - lastMicUiMs >= 150) {
+                lastMicUiMs = now
+                runOnUiThread {
+                    ui.visualizerView.updateMicBands(bands)
+                    if (micLow + micMed + micHigh > 0.03f) {
+                        ui.matrixVisualizer.updateSpectralBands(micLow, micMed, micHigh)
+                        ui.visualizerView.updateSpectralTriplet(micLow, micMed, micHigh)
+                    }
+                }
             }
         }
         micAnalyzer.start()
