@@ -31,5 +31,8 @@ PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
 git add -A
 git commit -m "release $TAG (versionCode $NEWCODE)"
 git tag -a "$TAG" -m "NativeEQ $TAG"
-git push origin HEAD --tags
+git push origin HEAD || true   # github ref-lock flake: verify state after
+for i in 1 2 3; do
+  git push origin "$TAG" && break || { echo "tag push retry $i"; sleep 3; }
+done
 echo "shipped $TAG — CI will publish equalizer-release.apk to GitHub Releases"
