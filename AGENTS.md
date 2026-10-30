@@ -12,8 +12,16 @@ $GRADLE :app:assembleDebug
 # -> app/build/outputs/apk/debug/app-debug.apk
 ```
 
-System gradle (4.4.1) is too old — use the dists copy above. SDK at
-~/Android/Sdk (local.properties already set). Build on ext4, not /storage/emulated.
+System gradle (4.4.1) is too old — use the dists copy above or `./gradlew`
+(wrapper pinned to 9.1.0). SDK at ~/Android/Sdk (local.properties, gitignored).
+Build on ext4, not /storage/emulated.
+
+## Release
+
+Repo: github.com/indodankabis/nativeeq. Keystore: ~/.keystores/ (NEVER commit;
+creds in ~/.keystores/nativeeq.env — source it for local release builds).
+CI: tag push `v*` → .github/workflows/release.yml → equalizer-release.apk on
+GitHub Releases. Ship with `ship v1.0.0` (alias in ~/.bash_aliases → ./ship.sh).
 
 ## AI backend chain (LiteRtLmAcousticEngine.kt)
 
