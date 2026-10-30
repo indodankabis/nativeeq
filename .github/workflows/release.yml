@@ -58,6 +58,7 @@ jobs:
       - name: Stage + verify APK
         run: |
           cp app/build/outputs/apk/release/app-release.apk equalizer-release.apk
+          sha256sum equalizer-release.apk > SHA256SUMS.txt
           APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
           "$APKSIGNER" verify --print-certs equalizer-release.apk | head -6
 
@@ -66,7 +67,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          gh release create "$TAG" equalizer-release.apk \
+          SHA=$(cut -d' ' -f1 SHA256SUMS.txt)
+          gh release create "$TAG" equalizer-release.apk SHA256SUMS.txt \
             --title "NativeEQ $TAG" \
             --latest \
-            --notes "$(printf 'arm64-v8a signed release (v1+v2+v3 schemes). Install or auto-update via Obtainium.\n\nSupport development: https://ko-fi.com/indodankabis\n')"
+            --notes "$(printf "arm64-v8a signed release (v1+v2+v3 schemes). Install or auto-update via Obtainium.\n\nSHA-256: %s\n\nSupport development: https://ko-fi.com/indodankabis\n" "$SHA")"

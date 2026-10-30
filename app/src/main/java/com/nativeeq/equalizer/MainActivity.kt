@@ -246,6 +246,50 @@ class MainActivity : Activity() {
 
         refreshModelStatus()
         checkAudioPermission()
+        checkForUpdates()
+    }
+
+    private fun checkForUpdates() {
+        Thread {
+            try {
+                val conn = java.net.URL(
+                    "https://api.github.com/repos/indodankabis/nativeeq/releases/latest"
+                ).openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 4000
+                conn.readTimeout = 4000
+                conn.setRequestProperty("User-Agent", "nativeeq")
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                conn.disconnect()
+                val latest = Regex("\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"")
+                    .find(body)?.groupValues?.get(1) ?: return@Thread
+                if (!isNewerVersion(latest, BuildConfig.VERSION_NAME)) return@Thread
+                runOnUiThread {
+                    ui.updateBtn.text = "UPDATE AVAILABLE: v$latest — GET APK"
+                    ui.updateBtn.visibility = View.VISIBLE
+                    ui.updateBtn.setOnClickListener {
+                        startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://github.com/indodankabis/nativeeq/releases/latest")
+                            )
+                        )
+                    }
+                    appendLog("[UPDATE] v$latest on GitHub Releases")
+                }
+            } catch (_: Exception) {
+            }
+        }.start()
+    }
+
+    private fun isNewerVersion(latest: String, current: String): Boolean {
+        val l = latest.split('.').map { it.toIntOrNull() ?: 0 }
+        val c = current.split('.').map { it.toIntOrNull() ?: 0 }
+        for (i in 0 until maxOf(l.size, c.size)) {
+            val a = l.getOrElse(i) { 0 }
+            val b = c.getOrElse(i) { 0 }
+            if (a != b) return a > b
+        }
+        return false
     }
 
     private fun onAgentTick(

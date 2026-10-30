@@ -1,0 +1,1 @@
+5-band DSP equalizer with on-device AI tuning — no ads, no trackers

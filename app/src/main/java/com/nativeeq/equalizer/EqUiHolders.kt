@@ -148,6 +148,18 @@ class EqUiHolders(context: Context) {
         setTextColor(Color.BLACK)
         setBackgroundColor(Color.parseColor("#facc15"))
     }
+    val updateBtn = Button(context).apply {
+        val dp = context.resources.displayMetrics.density
+        layoutParams = LinearLayout.LayoutParams(-1, (56 * dp).toInt()).apply {
+            setMargins(0, (10 * dp).toInt(), 0, 0)
+        }
+        text = "UPDATE AVAILABLE"
+        typeface = Typeface.MONOSPACE
+        textSize = 16f
+        setTextColor(Color.BLACK)
+        setBackgroundColor(Color.parseColor("#38bdf8"))
+        visibility = View.GONE
+    }
 
     init {
         scrollContainer.addView(root)
@@ -327,6 +339,7 @@ class EqUiHolders(context: Context) {
         drawerLayout.addView(advisorResultLabel)
         drawerLayout.addView(applyRecBtn)
         drawerLayout.addView(tipBtn)
+        drawerLayout.addView(updateBtn)
         root.addView(drawerLayout)
     }
 }

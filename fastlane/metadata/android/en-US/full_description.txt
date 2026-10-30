@@ -1,0 +1,14 @@
+Zero-bloat system-wide equalizer built on Android's DynamicsProcessing engine.
+
+Features:
+* Real 5-band parametric DSP with 60fps morphing gain engine
+* Limiter with automatic pre-gain compensation
+* Bass boost + virtualizer
+* Room correction via 3s log-sweep mic calibration
+* On-device AI tuning — LiteRT-LM (Gemma), Gemini Nano, or bundled TFLite advisor; every response labeled with the backend that produced it
+* Quick Settings tile, foreground mediaPlayback service (survives Android 14+ background limits)
+* SQLite telemetry logbook with ASCII heatmap
+
+No ads, no trackers, no accounts. Pure Kotlin, programmatic UI — no UI framework bloat. Free and open source; development supported via Ko-fi.
+
+Requires: arm64 device, Android 8.0+.
