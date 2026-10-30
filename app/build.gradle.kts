@@ -15,8 +15,8 @@ android {
         applicationId = "com.nativeeq.equalizer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 44
-        versionName = "44.0-source"
+        versionCode = 45
+        versionName = "1.0.0"
         ndk {
             abiFilters += "arm64-v8a"
         }
