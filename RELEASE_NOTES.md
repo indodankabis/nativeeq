@@ -1,3 +1,9 @@
+## v1.0.2 — 2026-10-31 (versionCode 47)
+
+- perf: move DSP off main thread — dumpsys spam was on UI thread
+- ui: material polish — rounded cards, ripples, dp touch targets, sentence case
+- ship: split branch/tag push + retry (github ref-lock flake)
+
 ## v1.0.1 — 2026-10-30 (versionCode 46)
 
 - full/foss flavors: isolate proprietary genai-prompt for F-Droid
