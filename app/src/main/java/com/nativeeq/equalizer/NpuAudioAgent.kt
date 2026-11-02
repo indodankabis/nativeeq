@@ -5,11 +5,15 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
+import kotlin.math.ln
+import kotlin.math.sign
 
 /**
  * Deterministic closed-loop spectral controller (no ML model — plain control
  * theory). Normalized L/M/H energy ratios are driven toward a target curve;
- * each actuation is followed by a feedback pass that damps overshoot. The
+ * the 24-band log spectrum decides how each correction is split between the
+ * two bands that share a blob (60/230Hz, 3.6k/14kHz). Each actuation is
+ * followed by a feedback pass that damps overshoot. The
  * corrections are pushed to the real DynamicsProcessing chain through
  * ACTION_APPLY_NPU_CORRECTION.
  */
@@ -33,6 +37,16 @@ class NpuAudioAgent(private val context: Context) {
     private val targetMed = 0.36f
     private val targetHigh = 0.26f
 
+    private val spectrumLock = Any()
+    private var spectrumEma: FloatArray? = null
+    @Volatile private var lastSpectrumMs = 0L
+    private val eqCentersHz = floatArrayOf(60f, 230f, 910f, 3600f, 14000f)
+    // Which of the 5 EQ bands each spectrum band is nearest to (log distance).
+    private val spectrumToEqBand = IntArray(EqualizerService.SPECTRUM_BANDS) { b ->
+        val f = EqualizerService.spectrumBandCenterHz(b)
+        eqCentersHz.indices.minByOrNull { abs(ln(f / eqCentersHz[it])) } ?: 0
+    }
+
     private val adaptiveGainsMb = FloatArray(5)
     private val smoothedGainsMb = FloatArray(5)
 
@@ -54,6 +68,39 @@ class NpuAudioAgent(private val context: Context) {
         latestLow = low
         latestMed = med
         latestHigh = high
+    }
+
+    /** ~4Hz log-spaced spectrum from EqualizerService.onSpectrumListener. */
+    fun pushSpectrum(bands: FloatArray) {
+        if (bands.size != EqualizerService.SPECTRUM_BANDS) return
+        synchronized(spectrumLock) {
+            val ema = spectrumEma
+            if (ema == null) {
+                spectrumEma = bands.copyOf()
+            } else {
+                for (i in ema.indices) ema[i] = ema[i] * 0.6f + bands[i] * 0.4f
+            }
+        }
+        lastSpectrumMs = android.os.SystemClock.uptimeMillis()
+    }
+
+    /** Smoothed spectral context, or null if no fresh frames (capture paused). */
+    fun latestSpectrum(): FloatArray? {
+        if (android.os.SystemClock.uptimeMillis() - lastSpectrumMs > 2000L) return null
+        return synchronized(spectrumLock) { spectrumEma?.copyOf() }
+    }
+
+    /** Per-EQ-band mean level (0..1 dB scale) from the spectrum, or null if stale. */
+    private fun eqBandLevels(): FloatArray? {
+        val spec = latestSpectrum() ?: return null
+        val sum = FloatArray(5)
+        val cnt = IntArray(5)
+        for (b in spec.indices) {
+            val e = spectrumToEqBand[b]
+            sum[e] += spec[b]
+            cnt[e]++
+        }
+        return FloatArray(5) { if (cnt[it] > 0) sum[it] / cnt[it] else 0f }
     }
 
     private fun startClosedLoop() {
@@ -92,11 +139,23 @@ class NpuAudioAgent(private val context: Context) {
                                         "H:${(avgH * 100).toInt()}%). Holding gains."
                                     statusHeadline = "NPU LOCKED: TARGET CONVERGED"
                                 } else {
-                                    val step0 = (-errLow * 320f).coerceIn(-120f, 120f)
-                                    val step1 = (-errLow * 180f).coerceIn(-90f, 90f)
+                                    // Spectral shape: push more of the bass correction into
+                                    // whichever of 60/230Hz is driving the error (same for
+                                    // 3.6k/14k). 0.1 level diff (~4.5dB) = full 50% shift.
+                                    var lowSplit = 0f
+                                    var highSplit = 0f
+                                    val levels = eqBandLevels()
+                                    if (levels != null) {
+                                        lowSplit = ((levels[0] - levels[1]) * sign(errLow) * 5f)
+                                            .coerceIn(-0.5f, 0.5f)
+                                        highSplit = ((levels[4] - levels[3]) * sign(errHigh) * 5f)
+                                            .coerceIn(-0.5f, 0.5f)
+                                    }
+                                    val step0 = (-errLow * 320f * (1f + lowSplit)).coerceIn(-120f, 120f)
+                                    val step1 = (-errLow * 180f * (1f - lowSplit)).coerceIn(-90f, 90f)
                                     val step2 = (-errMed * 240f).coerceIn(-100f, 100f)
-                                    val step3 = (-errHigh * 220f).coerceIn(-100f, 100f)
-                                    val step4 = (-errHigh * 300f).coerceIn(-120f, 120f)
+                                    val step3 = (-errHigh * 220f * (1f - highSplit)).coerceIn(-100f, 100f)
+                                    val step4 = (-errHigh * 300f * (1f + highSplit)).coerceIn(-120f, 120f)
                                     adaptiveGainsMb[0] =
                                         (adaptiveGainsMb[0] + step0).coerceIn(-450f, 450f)
                                     adaptiveGainsMb[1] =
@@ -123,7 +182,13 @@ class NpuAudioAgent(private val context: Context) {
                                     }
                                     statusHeadline =
                                         "NPU ACTUATING: ${lastHypothesis.take(28)}..."
-                                    logLine = "[1.ACT] $lastHypothesis | $transferTag"
+                                    val shapeTag = if (levels != null) {
+                                        " | SHAPE 60/230:${(lowSplit * 100).toInt()}% " +
+                                            "14k/3.6k:${(highSplit * 100).toInt()}%"
+                                    } else {
+                                        ""
+                                    }
+                                    logLine = "[1.ACT] $lastHypothesis | $transferTag$shapeTag"
                                     loopPhase = 1
                                 }
                             } else {

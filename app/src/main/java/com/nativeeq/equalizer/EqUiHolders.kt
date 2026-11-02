@@ -174,6 +174,7 @@ class EqUiHolders(context: Context) {
     val analyzeBtn = Button(context)
     val heatmapBtn = Button(context)
     val clearDbBtn = Button(context)
+    val exportDatasetBtn = Button(context)
     val advisorResultLabel = TextView(context).apply {
         textSize = 12f
         setTextColor(Color.parseColor("#facc15"))
@@ -347,6 +348,13 @@ class EqUiHolders(context: Context) {
         advRow.addView(heatmapBtn)
         advRow.addView(clearDbBtn)
         drawerLayout.addView(advRow)
+        exportDatasetBtn.apply {
+            layoutParams = LinearLayout.LayoutParams(-1, dp(48f)).apply {
+                setMargins(0, 0, 0, dp(8f))
+            }
+            text = "Export training dataset (JSON)"
+        }.style("#1e293b", Color.parseColor("#a78bfa"), 13f)
+        drawerLayout.addView(exportDatasetBtn)
         drawerLayout.addView(advisorResultLabel)
 
         applyRecBtn.apply {
