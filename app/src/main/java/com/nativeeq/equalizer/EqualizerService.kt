@@ -6,7 +6,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
+import android.media.AudioPlaybackConfiguration
 import android.os.Build
 import android.media.audiofx.BassBoost
 import android.media.audiofx.DynamicsProcessing
@@ -16,10 +19,15 @@ import android.os.Binder
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.SystemClock
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
-import kotlin.math.hypot
+import kotlin.math.log10
+import kotlin.math.pow
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 class EqualizerService : Service() {
 
@@ -48,7 +56,49 @@ class EqualizerService : Service() {
 
         var bassBoostStrength: Short = 0
         var virtualizerStrength: Short = 0
+        /** UI-facing L/M/H triplet, delivered every FFT frame. */
         var onTelemetryListener: ((Float, Float, Float) -> Unit)? = null
+        /** Agent-facing log-spaced spectrum (SPECTRUM_BANDS levels in 0..1), ~4Hz. */
+        var onSpectrumListener: ((FloatArray) -> Unit)? = null
+
+        const val SPECTRUM_BANDS = 24
+        const val SPECTRUM_MIN_HZ = 50f
+        const val SPECTRUM_MAX_HZ = 16000f
+        private const val SPECTRUM_INTERVAL_MS = 250L
+        // 10*log10(1 + max byte-FFT power 128^2 * 2)
+        private val SPECTRUM_DB_FULL_SCALE = 10f * log10(1f + 32768f)
+
+        const val GAIN_GRID_MB = 50f
+        const val LIMITER_GRID_DB = 0.1f
+
+        // AudioPlaybackConfiguration.PLAYER_STATE_* (@SystemApi constants)
+        private const val PLAYER_STATE_RELEASED = 0
+        private const val PLAYER_STATE_STOPPED = 4
+
+        fun spectrumBandEdgeHz(edge: Int): Float =
+            SPECTRUM_MIN_HZ * (SPECTRUM_MAX_HZ / SPECTRUM_MIN_HZ)
+                .pow(edge.toFloat() / SPECTRUM_BANDS)
+
+        fun spectrumBandCenterHz(band: Int): Float =
+            sqrt(spectrumBandEdgeHz(band) * spectrumBandEdgeHz(band + 1))
+
+        /** Snap a gain to the 50mB grid the DSP actually plays. */
+        fun quantizeGainMb(mb: Float): Float = (mb / GAIN_GRID_MB).roundToInt() * GAIN_GRID_MB
+
+        fun quantizeGains(gainsMb: ShortArray): FloatArray =
+            FloatArray(gainsMb.size) { quantizeGainMb(gainsMb[it].toFloat()) }
+
+        fun limiterPreGainFor(gainsMb: FloatArray): Float {
+            var maxBoostDb = 0f
+            for (mb in gainsMb) {
+                val db = mb / 100f * 1.75f
+                if (db > maxBoostDb) maxBoostDb = db
+            }
+            return (-0.45f * maxBoostDb / LIMITER_GRID_DB).roundToInt() * LIMITER_GRID_DB
+        }
+
+        fun limiterPreGainFor(gainsMb: ShortArray): Float =
+            limiterPreGainFor(FloatArray(gainsMb.size) { gainsMb[it].toFloat() })
 
         val profileNames = arrayOf(
             "Flat", "Deep Bass", "Sub Punch", "Warm Lows", "Mid Presence",
@@ -80,11 +130,16 @@ class EqualizerService : Service() {
         private set
     private var dspConfig: DynamicsProcessing.Config? = null
     private var sessionDps: HashMap<Int, DynamicsProcessing>? = null
+    // Per-DP snapshot of what was last pushed through JNI: [0..bandCount) preEq
+    // gains in mB, [bandCount] limiter postGain in centi-dB.
+    private val lastWritten = HashMap<DynamicsProcessing, ShortArray>()
     var bassBoost: BassBoost? = null
         private set
     var virtualizer: Virtualizer? = null
         private set
     private var visualizer: Visualizer? = null
+    private val captureLock = Any()
+    private var captureWanted = false
 
     val bandCount = 5
     val currentGainsMb = FloatArray(bandCount)
@@ -94,28 +149,35 @@ class EqualizerService : Service() {
     var targetLimiterPreGainDb = 0f
         private set
 
-    private var isMorphing = false
+    private val isMorphing = AtomicBoolean(false)
     private val morphAlpha = 0.22f
     private val frameIntervalMs = 16L
     // DSP work runs on its own thread — the morph loop does JNI writes into
-    // audio effects every 16ms and session sync shells out to `dumpsys audio`;
+    // audio effects and session reconciliation runs off playback callbacks;
     // neither belongs on the main looper.
     private val dspThread = HandlerThread("eq_dsp").apply { start() }
     private val morphHandler = Handler(dspThread.looper)
-    private var sessionSyncPending = false
     private var isForegroundStarted = false
+    private var playbackCallbackRegistered = false
 
     private val dbHelper by lazy { TelemetryDbHelper(this) }
     private val binder = LocalBinder()
 
     private val bandFreqs = floatArrayOf(60f, 230f, 910f, 3600f, 14000f)
 
+    // FFT -> log-band map, rebuilt only when capture size / sample rate change.
+    private var spectrumBinLo = IntArray(SPECTRUM_BANDS)
+    private var spectrumBinHi = IntArray(SPECTRUM_BANDS)
+    private var spectrumMapKey = 0L
+    private var lastSpectrumMs = 0L
+
     private val morphRunnable = object : Runnable {
         override fun run() {
+            val frameStart = SystemClock.uptimeMillis()
             var activeDelta = false
             for (i in 0 until bandCount) {
                 val diff = targetGainsMb[i] - currentGainsMb[i]
-                if (abs(diff) > 1f) {
+                if (abs(diff) > GAIN_GRID_MB) {
                     currentGainsMb[i] += morphAlpha * diff
                     activeDelta = true
                 } else {
@@ -123,44 +185,85 @@ class EqualizerService : Service() {
                 }
             }
             val limiterDiff = targetLimiterPreGainDb - currentLimiterPreGainDb
-            if (abs(limiterDiff) > 0.05f) {
+            if (abs(limiterDiff) > LIMITER_GRID_DB) {
                 currentLimiterPreGainDb += morphAlpha * limiterDiff
                 activeDelta = true
             } else {
                 currentLimiterPreGainDb = targetLimiterPreGainDb
             }
-            applyHardwareState()
-            if (activeDelta) {
-                morphHandler.postDelayed(this, frameIntervalMs)
+            val wrote = applyHardwareState()
+            if (wrote || activeDelta) {
+                // Self-clocking: hold a 16ms cadence, but if the JNI writes
+                // themselves overran the frame, yield at least that long.
+                val cost = SystemClock.uptimeMillis() - frameStart
+                val delay = if (cost < frameIntervalMs) frameIntervalMs - cost else cost
+                morphHandler.postDelayed(this, delay)
             } else {
-                isMorphing = false
+                isMorphing.set(false)
+                // A target may have landed between the last check and the flag drop.
+                if (hasPendingMorph() && isMorphing.compareAndSet(false, true)) {
+                    morphHandler.post(this)
+                }
             }
         }
     }
+
+    private val playbackCallback = object : AudioManager.AudioPlaybackCallback() {
+        override fun onPlaybackConfigChanged(configs: MutableList<AudioPlaybackConfiguration>?) {
+            onPlaybackConfigs(configs ?: emptyList())
+        }
+    }
+
+    private val dumpsysReconcile = Runnable { reconcileSessions(readDumpsysSessions()) }
 
     init {
         initDspEffects()
         startAudioCapture()
     }
 
-    private fun applyGainsToDp(dp: DynamicsProcessing) {
+    override fun onCreate() {
+        super.onCreate()
+        registerSessionTracking()
+    }
+
+    private fun hasPendingMorph(): Boolean {
         for (i in 0 until bandCount) {
+            if (targetGainsMb[i] != currentGainsMb[i]) return true
+        }
+        return targetLimiterPreGainDb != currentLimiterPreGainDb
+    }
+
+    /** Writes only the params whose quantized value changed. Returns true if any JNI write happened. */
+    private fun applyGainsToDp(dp: DynamicsProcessing): Boolean {
+        val cache = lastWritten.getOrPut(dp) { ShortArray(bandCount + 1) { Short.MIN_VALUE } }
+        var wrote = false
+        for (i in 0 until bandCount) {
+            val mb = currentGainsMb[i].roundToInt().coerceIn(-9999, 9999).toShort()
+            if (mb == cache[i]) continue
             for (ch in 0..1) {
                 val band = dp.getPreEqBandByChannelIndex(ch, i)
-                band.gain = currentGainsMb[i] / 100f
+                band.gain = mb / 100f
                 dp.setPreEqBandByChannelIndex(ch, i, band)
             }
+            cache[i] = mb
+            wrote = true
         }
-        for (ch in 0..1) {
-            val limiter = dp.getLimiterByChannelIndex(ch)
-            limiter.linkGroup = 0
-            limiter.attackTime = 1f
-            limiter.releaseTime = 60f
-            limiter.ratio = 10f
-            limiter.threshold = -1f
-            limiter.postGain = currentLimiterPreGainDb
-            dp.setLimiterByChannelIndex(ch, limiter)
+        val postGainCdb = (currentLimiterPreGainDb * 100f).roundToInt().coerceIn(-9999, 9999).toShort()
+        if (postGainCdb != cache[bandCount]) {
+            for (ch in 0..1) {
+                val limiter = dp.getLimiterByChannelIndex(ch)
+                limiter.linkGroup = 0
+                limiter.attackTime = 1f
+                limiter.releaseTime = 60f
+                limiter.ratio = 10f
+                limiter.threshold = -1f
+                limiter.postGain = postGainCdb / 100f
+                dp.setLimiterByChannelIndex(ch, limiter)
+            }
+            cache[bandCount] = postGainCdb
+            wrote = true
         }
+        return wrote
     }
 
     private fun initDspEffects() {
@@ -169,17 +272,13 @@ class EqualizerService : Service() {
             val config = DynamicsProcessing.Config.Builder(
                 0, 2, true, bandCount, true, bandCount, false, 0, true
             ).build()
+            for (b in 0 until bandCount) {
+                config.setPreEqBandAllChannelsTo(b, DynamicsProcessing.EqBand(true, bandFreqs[b], 0f))
+            }
             dspConfig = config
             val dp = DynamicsProcessing(0, 0, config)
             dp.enabled = true
             dynamicsProcessing = dp
-            for (ch in 0..1) {
-                for (b in 0 until bandCount) {
-                    val band = dp.getPreEqBandByChannelIndex(ch, b)
-                    band.cutoffFrequency = bandFreqs[b]
-                    dp.setPreEqBandByChannelIndex(ch, b, band)
-                }
-            }
             sessionDps = HashMap()
             val bb = BassBoost(0, 0)
             bb.enabled = true
@@ -194,55 +293,91 @@ class EqualizerService : Service() {
     }
 
     /**
-     * Per-session attach: mirror the global DP onto every live audio session
-     * found in `dumpsys audio` (needs the DUMP development permission).
-     * Runs on the DSP thread, debounced — dumpsys is a fork+exec+parse and
-     * startService arrives per UI action.
+     * Per-session attach, event-driven: AudioPlaybackCallback fires on every
+     * player start/pause/stop and we reconcile the session -> DP map.
      */
-    private fun scheduleSessionSync() {
-        if (sessionSyncPending) return
-        sessionSyncPending = true
-        morphHandler.postDelayed({
-            sessionSyncPending = false
-            syncSessionEffects()
-        }, 1500)
+    private fun registerSessionTracking() {
+        if (playbackCallbackRegistered) return
+        val am = getSystemService(AudioManager::class.java) ?: return
+        try {
+            am.registerAudioPlaybackCallback(playbackCallback, morphHandler)
+            playbackCallbackRegistered = true
+            val initial = am.activePlaybackConfigurations
+            morphHandler.post { onPlaybackConfigs(initial) }
+        } catch (_: Exception) {
+        }
     }
 
-    private fun syncSessionEffects() {
-        val map = sessionDps ?: return
-        val config = dspConfig ?: return
+    private fun onPlaybackConfigs(configs: List<AudioPlaybackConfiguration>) {
+        val live = HashSet<Int>()
+        var anonymized = 0
+        for (cfg in configs) {
+            val state = PlaybackConfigReflect.playerState(cfg)
+            if (state == PLAYER_STATE_STOPPED || state == PLAYER_STATE_RELEASED) continue
+            val session = PlaybackConfigReflect.sessionId(cfg)
+            if (session == 0) {
+                anonymized++
+                continue
+            }
+            live.add(session)
+        }
+        // Without MODIFY_AUDIO_ROUTING (privileged-only) the framework hands us
+        // anonymizedCopy()s whose sessionId is always 0. If the user granted
+        // DUMP, read the real ids once for this event instead of polling.
+        if (live.isEmpty() && anonymized > 0 && hasDumpPermission()) {
+            morphHandler.removeCallbacks(dumpsysReconcile)
+            morphHandler.post(dumpsysReconcile)
+            return
+        }
+        reconcileSessions(live)
+    }
+
+    private fun hasDumpPermission(): Boolean =
+        checkSelfPermission(android.Manifest.permission.DUMP) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun readDumpsysSessions(): Set<Int> {
         val live = HashSet<Int>()
         try {
-            val reader = BufferedReader(
+            BufferedReader(
                 InputStreamReader(Runtime.getRuntime().exec("dumpsys audio").inputStream)
-            )
-            while (true) {
-                val line = reader.readLine() ?: break
-                val idx = line.indexOf("session:")
-                if (idx < 0) continue
-                val start = idx + 8
-                var end = start
-                while (end < line.length && line[end].isDigit()) end++
-                if (end == start) continue
-                val session = line.substring(start, end).toIntOrNull() ?: continue
-                if (session == 0) continue
-                live.add(session)
-                if (!map.containsKey(session)) {
-                    try {
-                        val dp = DynamicsProcessing(0, session, config)
-                        dp.enabled = true
-                        map[session] = dp
-                    } catch (_: Exception) {
-                    }
+            ).use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    val idx = line.indexOf("session:")
+                    if (idx < 0) continue
+                    val start = idx + 8
+                    var end = start
+                    while (end < line.length && line[end].isDigit()) end++
+                    if (end == start) continue
+                    val session = line.substring(start, end).toIntOrNull() ?: continue
+                    if (session != 0) live.add(session)
                 }
             }
-            reader.close()
         } catch (_: Exception) {
+        }
+        return live
+    }
+
+    @Synchronized
+    private fun reconcileSessions(live: Set<Int>) {
+        val map = sessionDps ?: return
+        val config = dspConfig ?: return
+        for (session in live) {
+            if (map.containsKey(session)) continue
+            try {
+                val dp = DynamicsProcessing(0, session, config)
+                dp.enabled = true
+                map[session] = dp
+                applyGainsToDp(dp)
+            } catch (_: Exception) {
+            }
         }
         val it = map.entries.iterator()
         while (it.hasNext()) {
             val entry = it.next()
             if (!live.contains(entry.key)) {
+                lastWritten.remove(entry.value)
                 try {
                     entry.value.release()
                 } catch (_: Exception) {
@@ -253,62 +388,129 @@ class EqualizerService : Service() {
     }
 
     @Synchronized
-    private fun applyHardwareState() {
-        val dp = dynamicsProcessing ?: return
+    private fun applyHardwareState(): Boolean {
+        val dp = dynamicsProcessing ?: return false
+        var wrote = false
         try {
-            applyGainsToDp(dp)
+            wrote = applyGainsToDp(dp)
         } catch (_: Exception) {
         }
         sessionDps?.values?.forEach {
             try {
-                applyGainsToDp(it)
+                if (applyGainsToDp(it)) wrote = true
+            } catch (_: Exception) {
+            }
+        }
+        return wrote
+    }
+
+    /**
+     * The Visualizer only runs while someone consumes it: the UI is on screen
+     * or the closed-loop agent is driving the EQ.
+     */
+    fun setCaptureDemand(uiVisible: Boolean, agentActive: Boolean) {
+        synchronized(captureLock) {
+            captureWanted = uiVisible || agentActive
+            val v = visualizer ?: return
+            try {
+                if (v.enabled != captureWanted) v.enabled = captureWanted
             } catch (_: Exception) {
             }
         }
     }
 
     private fun startAudioCapture() {
-        if (visualizer != null) return
-        try {
-            val v = Visualizer(0)
-            v.captureSize = Visualizer.getCaptureSizeRange()[1]
-            v.setDataCaptureListener(
-                object : Visualizer.OnDataCaptureListener {
-                    override fun onWaveFormDataCapture(
-                        v: Visualizer?, waveform: ByteArray?, samplingRate: Int,
-                    ) {
-                    }
-
-                    override fun onFftDataCapture(
-                        v: Visualizer?, fft: ByteArray?, samplingRate: Int,
-                    ) {
-                        if (fft == null) return
-                        var lowSum = 0f
-                        var medSum = 0f
-                        var highSum = 0f
-                        val n = fft.size / 2
-                        for (i in 1 until n) {
-                            val mag = hypot(
-                                fft[i * 2].toFloat(), fft[i * 2 + 1].toFloat()
-                            )
-                            when {
-                                i < 8 -> lowSum += mag
-                                i < 33 -> medSum += mag
-                                else -> highSum += mag
-                            }
+        synchronized(captureLock) {
+            if (visualizer != null) return
+            try {
+                val v = Visualizer(0)
+                v.captureSize = Visualizer.getCaptureSizeRange()[1]
+                v.setDataCaptureListener(
+                    object : Visualizer.OnDataCaptureListener {
+                        override fun onWaveFormDataCapture(
+                            v: Visualizer?, waveform: ByteArray?, samplingRate: Int,
+                        ) {
                         }
-                        val low = (lowSum / 1024f).coerceIn(0f, 1f)
-                        val med = (medSum / 3072f).coerceIn(0f, 1f)
-                        val high = (highSum / ((n - 32) * 128f)).coerceIn(0f, 1f)
-                        onTelemetryListener?.invoke(low, med, high)
-                    }
-                },
-                Visualizer.getMaxCaptureRate() / 2, false, true
-            )
-            v.enabled = true
-            visualizer = v
-        } catch (_: Exception) {
+
+                        override fun onFftDataCapture(
+                            v: Visualizer?, fft: ByteArray?, samplingRate: Int,
+                        ) {
+                            if (fft == null) return
+                            onFftFrame(fft, samplingRate)
+                        }
+                    },
+                    Visualizer.getMaxCaptureRate() / 2, false, true
+                )
+                v.enabled = captureWanted
+                visualizer = v
+            } catch (_: Exception) {
+            }
         }
+    }
+
+    private fun onFftFrame(fft: ByteArray, samplingRateMilliHz: Int) {
+        var lowSum = 0f
+        var medSum = 0f
+        var highSum = 0f
+        val n = fft.size / 2
+        for (i in 1 until n) {
+            val re = fft[i * 2].toFloat()
+            val im = fft[i * 2 + 1].toFloat()
+            val mag = sqrt(re * re + im * im)
+            when {
+                i < 8 -> lowSum += mag
+                i < 33 -> medSum += mag
+                else -> highSum += mag
+            }
+        }
+        val low = (lowSum / 1024f).coerceIn(0f, 1f)
+        val med = (medSum / 3072f).coerceIn(0f, 1f)
+        val high = (highSum / ((n - 32) * 128f)).coerceIn(0f, 1f)
+        onTelemetryListener?.invoke(low, med, high)
+
+        val spectrumSink = onSpectrumListener ?: return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastSpectrumMs < SPECTRUM_INTERVAL_MS) return
+        lastSpectrumMs = now
+        spectrumSink(computeLogSpectrum(fft, samplingRateMilliHz))
+    }
+
+    /** Mean power per log-spaced band, as dB scaled to 0..1. One log10 per band, no per-bin sqrt. */
+    private fun computeLogSpectrum(fft: ByteArray, samplingRateMilliHz: Int): FloatArray {
+        val n = fft.size / 2
+        val key = (fft.size.toLong() shl 32) or (samplingRateMilliHz.toLong() and 0xffffffffL)
+        if (key != spectrumMapKey) {
+            val binHz = samplingRateMilliHz / 1000f / fft.size
+            for (b in 0 until SPECTRUM_BANDS) {
+                var lo = (spectrumBandEdgeHz(b) / binHz).toInt() + 1
+                var hi = (spectrumBandEdgeHz(b + 1) / binHz).toInt()
+                lo = lo.coerceIn(1, n - 1)
+                hi = hi.coerceIn(1, n - 1)
+                if (hi < lo) {
+                    // Band narrower than one bin: use the bin nearest its center.
+                    val c = (spectrumBandCenterHz(b) / binHz).roundToInt().coerceIn(1, n - 1)
+                    lo = c
+                    hi = c
+                }
+                spectrumBinLo[b] = lo
+                spectrumBinHi[b] = hi
+            }
+            spectrumMapKey = key
+        }
+        val out = FloatArray(SPECTRUM_BANDS)
+        for (b in 0 until SPECTRUM_BANDS) {
+            var power = 0f
+            val lo = spectrumBinLo[b]
+            val hi = spectrumBinHi[b]
+            for (i in lo..hi) {
+                val re = fft[i * 2].toFloat()
+                val im = fft[i * 2 + 1].toFloat()
+                power += re * re + im * im
+            }
+            val mean = power / (hi - lo + 1)
+            out[b] = (10f * log10(1f + mean) / SPECTRUM_DB_FULL_SCALE).coerceIn(0f, 1f)
+        }
+        return out
     }
 
     private fun promoteToForeground() {
@@ -356,7 +558,7 @@ class EqualizerService : Service() {
         promoteToForeground()
         initDspEffects()
         startAudioCapture()
-        scheduleSessionSync()
+        registerSessionTracking()
         when (intent?.action) {
             ACTION_SET_BASS -> {
                 val strength = intent.getShortExtra(EXTRA_BASS_STRENGTH, 0)
@@ -393,21 +595,17 @@ class EqualizerService : Service() {
 
     fun setTargetGains(targets: FloatArray, immediate: Boolean = false) {
         if (targets.size != bandCount) return
-        System.arraycopy(targets, 0, targetGainsMb, 0, bandCount)
-        var maxBoostDb = 0f
-        for (mb in targetGainsMb) {
-            val db = mb / 100f * 1.75f
-            if (db > maxBoostDb) maxBoostDb = db
+        for (i in 0 until bandCount) {
+            targetGainsMb[i] = quantizeGainMb(targets[i])
         }
-        targetLimiterPreGainDb = -0.45f * maxBoostDb
+        targetLimiterPreGainDb = limiterPreGainFor(targetGainsMb)
         if (immediate) {
             System.arraycopy(targetGainsMb, 0, currentGainsMb, 0, bandCount)
             currentLimiterPreGainDb = targetLimiterPreGainDb
             applyHardwareState()
             return
         }
-        if (!isMorphing) {
-            isMorphing = true
+        if (isMorphing.compareAndSet(false, true)) {
             morphHandler.post(morphRunnable)
         }
     }
@@ -451,14 +649,38 @@ class EqualizerService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         try {
+            if (playbackCallbackRegistered) {
+                getSystemService(AudioManager::class.java)
+                    ?.unregisterAudioPlaybackCallback(playbackCallback)
+                playbackCallbackRegistered = false
+            }
             morphHandler.removeCallbacks(morphRunnable)
+            morphHandler.removeCallbacks(dumpsysReconcile)
             dspThread.quitSafely()
             visualizer?.release()
             dynamicsProcessing?.release()
             bassBoost?.release()
             virtualizer?.release()
             sessionDps?.values?.forEach { it.release() }
+            sessionDps?.clear()
+            lastWritten.clear()
         } catch (_: Exception) {
         }
     }
+}
+
+/** AudioPlaybackConfiguration.getPlayerState()/getSessionId() are @SystemApi (sdk-listed, reflectable). */
+private object PlaybackConfigReflect {
+    private val getPlayerState = runCatching {
+        AudioPlaybackConfiguration::class.java.getMethod("getPlayerState")
+    }.getOrNull()
+    private val getSessionId = runCatching {
+        AudioPlaybackConfiguration::class.java.getMethod("getSessionId")
+    }.getOrNull()
+
+    fun playerState(cfg: AudioPlaybackConfiguration): Int =
+        runCatching { getPlayerState?.invoke(cfg) as? Int }.getOrNull() ?: -1
+
+    fun sessionId(cfg: AudioPlaybackConfiguration): Int =
+        runCatching { getSessionId?.invoke(cfg) as? Int }.getOrNull() ?: 0
 }

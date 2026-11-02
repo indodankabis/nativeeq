@@ -51,4 +51,13 @@ corrections now drive the actual DynamicsProcessing chain.
 - Visualizer created once (was re-created every morph tick).
 - SWEEP CAL button wired (AcousticSweeper was dead code in v43).
 - EQ graph drag/bypass listeners wired (were dead hooks in v43).
-- Per-session DP attach needs `pm grant com.nativeeq.equalizer android.permission.DUMP`.
+- Per-session DP attach is event-driven (`AudioPlaybackCallback`, session ids via
+  reflective `getSessionId()`/`getPlayerState()` — @SystemApi but sdk-listed).
+  Unprivileged apps get anonymized configs (sessionId 0, needs MODIFY_AUDIO_ROUTING),
+  so when DUMP is granted (`pm grant com.nativeeq.equalizer android.permission.DUMP`)
+  each callback event does one `dumpsys audio` read — no polling.
+- DP writes are dirty-tracked per DP; morph targets snap to a 50mB grid, limiter
+  to 0.1dB, so steady state issues zero JNI writes.
+- `tuning_events` (DB v17) = training dataset: 24-band spectrum + proposed gains +
+  kept/reverted label (TuningOutcomeTracker in TuningLogbook.kt). Drawer → Export
+  writes `Android/data/com.nativeeq.equalizer/files/nativeeq_training.json`.
