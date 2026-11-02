@@ -44,6 +44,7 @@ class MainActivity : Activity() {
     private var lastAgentUiMs = 0L
     private var uiVisible = false
     private var pendingRecommendationEventId = -1L
+    private var recommendedTier = "heuristic"
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val dragSettleRunnable = Runnable {
         outcomeTracker.propose(
@@ -275,6 +276,7 @@ class MainActivity : Activity() {
                     "%+.1fdB".format(Locale.US, gainMb / 100f)
         }
         ui.visualizerView.onBypassToggleListener = { bypassed ->
+            outcomeTracker.onBypass(bypassed)
             if (bypassed) {
                 eqService?.setTargetGains(FloatArray(5), immediate = true)
                 appendLog("[A/B] DSP bypassed — flat reference")
@@ -526,9 +528,9 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     recommendedState = resp.recommendedState
                     recommendedGains = resp.targetGains
+                    recommendedTier = TuningOutcomeTracker.tierForBackendTag(resp.backendTag)
                     pendingRecommendationEventId = outcomeTracker.propose(
-                        currentRoute,
-                        TuningOutcomeTracker.tierForBackendTag(resp.backendTag),
+                        currentRoute, recommendedTier,
                         npuAgent?.latestSpectrum(), resp.targetGains, applyNow = false
                     )
                     ui.advisorResultLabel.text =
@@ -555,16 +557,31 @@ class MainActivity : Activity() {
                     ui.advisorResultLabel.text.toString()
                 )
                 appendLog("[APPLY] Advisor gains -> DSP chain")
-                outcomeTracker.markApplied(pendingRecommendationEventId)
+                markRecommendationApplied(gains)
             }
             recommendedState != -1 -> {
                 setHardwareState(
                     recommendedState, ui.advisorResultLabel.text.toString(), trackAsUser = false
                 )
-                outcomeTracker.markApplied(pendingRecommendationEventId)
+                markRecommendationApplied(
+                    EqualizerService.profiles.getOrNull(recommendedState.coerceIn(0, 15))
+                        ?: ShortArray(5)
+                )
             }
         }
         ui.applyRecBtn.visibility = View.GONE
+    }
+
+    /** Label the event whose gains were actually applied; a superseded one gets a fresh row. */
+    private fun markRecommendationApplied(gains: ShortArray) {
+        if (outcomeTracker.isPending(pendingRecommendationEventId)) {
+            outcomeTracker.markApplied(pendingRecommendationEventId)
+        } else {
+            pendingRecommendationEventId = outcomeTracker.propose(
+                currentRoute, recommendedTier, npuAgent?.latestSpectrum(),
+                gains.clone(), applyNow = true
+            )
+        }
     }
 
     private fun appendLog(line: String) {

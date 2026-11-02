@@ -39,6 +39,14 @@ class TelemetryDbHelper(context: Context) :
         val kept: Boolean get() = outcome == OUTCOME_KEPT
     }
 
+    class PendingTuningEvent(
+        val id: Long,
+        val route: String,
+        val sourceTier: String,
+        val proposedGainsMb: FloatArray,
+        val appliedAt: Long?,
+    )
+
     data class TuningEventCounts(val pending: Long, val kept: Long, val reverted: Long) {
         val total: Long get() = pending + kept + reverted
     }
@@ -99,7 +107,7 @@ class TelemetryDbHelper(context: Context) :
             proposed_g0 REAL, proposed_g1 REAL, proposed_g2 REAL,
             proposed_g3 REAL, proposed_g4 REAL,
             limiter_pregain REAL,
-            outcome TEXT, resolved_at INTEGER,
+            outcome TEXT, resolved_at INTEGER, applied_at INTEGER,
             final_g0 REAL, final_g1 REAL, final_g2 REAL, final_g3 REAL, final_g4 REAL)"""
         )
     }
@@ -240,6 +248,37 @@ class TelemetryDbHelper(context: Context) :
             arrayOf(id.toString(), OUTCOME_PENDING)
         ) > 0
     }
+
+    /** Stamps when the proposal went live; persisted so the keep window survives exit. */
+    fun markTuningEventApplied(id: Long, appliedAt: Long = System.currentTimeMillis()) {
+        val cv = ContentValues().apply { put("applied_at", appliedAt) }
+        writableDatabase.update(
+            "tuning_events", cv, "id = ? AND outcome = ?",
+            arrayOf(id.toString(), OUTCOME_PENDING)
+        )
+    }
+
+    fun getPendingTuningEvents(): List<PendingTuningEvent> =
+        readableDatabase.rawQuery(
+            "SELECT id, route, source_tier, proposed_g0, proposed_g1, proposed_g2, " +
+                "proposed_g3, proposed_g4, applied_at FROM tuning_events " +
+                "WHERE outcome = ? ORDER BY id ASC",
+            arrayOf(OUTCOME_PENDING)
+        ).use { c ->
+            val out = ArrayList<PendingTuningEvent>()
+            while (c.moveToNext()) {
+                out.add(
+                    PendingTuningEvent(
+                        id = c.getLong(0),
+                        route = c.getString(1) ?: "",
+                        sourceTier = c.getString(2) ?: "",
+                        proposedGainsMb = FloatArray(5) { c.getFloat(3 + it) },
+                        appliedAt = if (c.isNull(8)) null else c.getLong(8),
+                    )
+                )
+            }
+            out
+        }
 
     fun getTuningEventCounts(): TuningEventCounts {
         var pending = 0L

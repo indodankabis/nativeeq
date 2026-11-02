@@ -82,6 +82,12 @@ class EqualizerService : Service() {
         fun spectrumBandCenterHz(band: Int): Float =
             sqrt(spectrumBandEdgeHz(band) * spectrumBandEdgeHz(band + 1))
 
+        /** Snap a gain to the 50mB grid the DSP actually plays. */
+        fun quantizeGainMb(mb: Float): Float = (mb / GAIN_GRID_MB).roundToInt() * GAIN_GRID_MB
+
+        fun quantizeGains(gainsMb: ShortArray): FloatArray =
+            FloatArray(gainsMb.size) { quantizeGainMb(gainsMb[it].toFloat()) }
+
         fun limiterPreGainFor(gainsMb: FloatArray): Float {
             var maxBoostDb = 0f
             for (mb in gainsMb) {
@@ -590,7 +596,7 @@ class EqualizerService : Service() {
     fun setTargetGains(targets: FloatArray, immediate: Boolean = false) {
         if (targets.size != bandCount) return
         for (i in 0 until bandCount) {
-            targetGainsMb[i] = (targets[i] / GAIN_GRID_MB).roundToInt() * GAIN_GRID_MB
+            targetGainsMb[i] = quantizeGainMb(targets[i])
         }
         targetLimiterPreGainDb = limiterPreGainFor(targetGainsMb)
         if (immediate) {

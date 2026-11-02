@@ -42,7 +42,10 @@ class TuningLogbook(private val context: Context) {
  * Turns tuning proposals into labeled tuning_events rows. A proposal starts
  * `pending`; once applied, holding it for [KEEP_WINDOW_MS] marks it `kept`.
  * A user gain change inside that window (or a newer proposal) marks it
- * `reverted` with the gains the user settled on. Main thread only.
+ * `reverted` with the gains the user settled on. A/B bypass pauses the
+ * window. The applied timestamp is persisted, so events left pending by an
+ * app exit are reconciled on the next start. Gains are recorded on the same
+ * 50mB grid the DSP plays. Main thread only.
  */
 class TuningOutcomeTracker(
     private val db: TelemetryDbHelper,
@@ -69,24 +72,67 @@ class TuningOutcomeTracker(
     private var pendingTier = ""
     private var applied = false
     private var reverting = false
+    private var bypassed = false
 
     private val keepRunnable = Runnable {
-        if (pendingId >= 0 && applied && !reverting) resolve(TelemetryDbHelper.OUTCOME_KEPT, currentGains())
+        if (pendingId >= 0 && applied && !reverting && !bypassed) {
+            resolve(TelemetryDbHelper.OUTCOME_KEPT, EqualizerService.quantizeGains(currentGains()))
+        }
     }
     private val revertRunnable = Runnable {
-        if (pendingId >= 0) resolve(TelemetryDbHelper.OUTCOME_REVERTED, currentGains())
+        if (pendingId >= 0) {
+            resolve(TelemetryDbHelper.OUTCOME_REVERTED, EqualizerService.quantizeGains(currentGains()))
+        }
     }
+
+    init {
+        recoverPending()
+    }
+
+    /** Resolve events orphaned by a previous exit; adopt one still inside its keep window. */
+    private fun recoverPending() {
+        val pending = try {
+            db.getPendingTuningEvents()
+        } catch (_: Exception) {
+            return
+        }
+        val now = System.currentTimeMillis()
+        // Only the newest applied event can still have been live; older ones were superseded.
+        val live = pending.lastOrNull { it.appliedAt != null }
+        val adopt = live?.takeIf { now - it.appliedAt!! < KEEP_WINDOW_MS }
+        for (ev in pending) {
+            when {
+                ev === adopt -> continue
+                ev === live -> resolveRow(
+                    ev.id, ev.route, ev.sourceTier, TelemetryDbHelper.OUTCOME_KEPT,
+                    ev.proposedGainsMb, wasApplied = true
+                )
+                else -> resolveRow(
+                    ev.id, ev.route, ev.sourceTier, TelemetryDbHelper.OUTCOME_REVERTED,
+                    null, wasApplied = ev.appliedAt != null
+                )
+            }
+        }
+        if (adopt != null) {
+            pendingId = adopt.id
+            pendingRoute = adopt.route
+            pendingTier = adopt.sourceTier
+            applied = true
+            handler.postDelayed(keepRunnable, KEEP_WINDOW_MS - (now - (adopt.appliedAt ?: now)))
+        }
+        onResolved()
+    }
+
+    fun isPending(id: Long): Boolean = id >= 0 && id == pendingId
 
     /** Records a proposal; any still-pending one is superseded (reverted -> these gains). */
     fun propose(
         route: String, tier: String, spectrum: FloatArray?, gainsMb: ShortArray, applyNow: Boolean,
     ): Long {
-        if (pendingId >= 0) resolve(TelemetryDbHelper.OUTCOME_REVERTED, gainsMb)
-        val floats = FloatArray(gainsMb.size) { gainsMb[it].toFloat() }
+        val q = EqualizerService.quantizeGains(gainsMb)
+        if (pendingId >= 0) resolve(TelemetryDbHelper.OUTCOME_REVERTED, q)
         val id = try {
-            db.insertTuningEvent(
-                route, tier, spectrum, floats, EqualizerService.limiterPreGainFor(floats)
-            )
+            db.insertTuningEvent(route, tier, spectrum, q, EqualizerService.limiterPreGainFor(q))
         } catch (_: Exception) {
             -1L
         }
@@ -100,14 +146,18 @@ class TuningOutcomeTracker(
         return id
     }
 
-    /** The proposal's gains are now live in the DSP chain; start the keep window. */
+    /** The proposal's gains are now live in the DSP chain; start (or restart) the keep window. */
     fun markApplied(id: Long) {
-        if (id < 0 || id != pendingId) return
+        if (!isPending(id)) return
         applied = true
         reverting = false
+        try {
+            db.markTuningEventApplied(id)
+        } catch (_: Exception) {
+        }
         handler.removeCallbacks(revertRunnable)
         handler.removeCallbacks(keepRunnable)
-        handler.postDelayed(keepRunnable, KEEP_WINDOW_MS)
+        if (!bypassed) handler.postDelayed(keepRunnable, KEEP_WINDOW_MS)
     }
 
     /** A user-initiated gain change that is not itself a new proposal (e.g. mid-drag). */
@@ -119,27 +169,47 @@ class TuningOutcomeTracker(
         handler.postDelayed(revertRunnable, REVERT_SETTLE_MS)
     }
 
-    private fun resolve(outcome: String, finalGains: ShortArray) {
+    /** A/B bypass: listening to flat isn't acceptance. Pause, then a fresh window on re-engage. */
+    fun onBypass(isBypassed: Boolean) {
+        bypassed = isBypassed
+        if (pendingId < 0 || !applied || reverting) return
+        if (isBypassed) handler.removeCallbacks(keepRunnable) else markApplied(pendingId)
+    }
+
+    private fun resolve(outcome: String, finalGains: FloatArray) {
         val id = pendingId
         pendingId = -1L
         handler.removeCallbacks(keepRunnable)
         handler.removeCallbacks(revertRunnable)
         if (id < 0) return
+        resolveRow(id, pendingRoute, pendingTier, outcome, finalGains, applied)
+        onResolved()
+    }
+
+    private fun resolveRow(
+        id: Long, route: String, tier: String, outcome: String,
+        finalGains: FloatArray?, wasApplied: Boolean,
+    ) {
         val ok = try {
-            db.resolveTuningEvent(id, outcome, FloatArray(finalGains.size) { finalGains[it].toFloat() })
+            db.resolveTuningEvent(id, outcome, finalGains)
         } catch (_: Exception) {
             false
         }
         if (ok) {
+            val logGains = finalGains?.let { f -> ShortArray(f.size) { f[it].toInt().toShort() } }
+                ?: ShortArray(5)
             logbook.recordEntry(
-                pendingRoute, "Outcome: ${outcome.uppercase()} [$pendingTier]", finalGains,
-                "tuning_events #$id" + if (applied) "" else " (never applied)"
+                route, "Outcome: ${outcome.uppercase()} [$tier]", logGains,
+                "tuning_events #$id" + if (wasApplied) "" else " (never applied)"
             )
         }
-        onResolved()
     }
 
+    /** Exit: settle what can be settled now; an applied event in its window stays pending for recovery. */
     fun release() {
+        if (pendingId >= 0 && (reverting || !applied)) {
+            resolve(TelemetryDbHelper.OUTCOME_REVERTED, EqualizerService.quantizeGains(currentGains()))
+        }
         handler.removeCallbacks(keepRunnable)
         handler.removeCallbacks(revertRunnable)
     }
