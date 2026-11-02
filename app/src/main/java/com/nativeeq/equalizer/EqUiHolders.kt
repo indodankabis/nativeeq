@@ -4,8 +4,14 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
+import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
@@ -14,170 +20,201 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 
+/** Programmatic CRT-terminal UI, neon arcade palette. */
 class EqUiHolders(context: Context) {
 
+    companion object {
+        val BG = Color.parseColor("#0a0a12")
+        val PANEL = Color.parseColor("#0e0e1a")
+        val WELL = Color.parseColor("#06060c")
+        val CYAN = Color.parseColor("#00f2fe")
+        val MAGENTA = Color.parseColor("#ff2e97")
+        val PURPLE = Color.parseColor("#a78bfa")
+        val LIME = Color.parseColor("#b8ff29")
+        val AMBER = Color.parseColor("#ffb300")
+        val RED = Color.parseColor("#ff3b3b")
+        val DIM = Color.parseColor("#4a4a66")
+        private const val BAR_BLOCKS = 10
+    }
+
+    private val ctx = context
     private val d = context.resources.displayMetrics.density
 
     private fun dp(v: Float) = (v * d).toInt()
 
-    private fun roundRect(color: String, radiusDp: Float) = GradientDrawable().apply {
-        setColor(Color.parseColor(color))
-        cornerRadius = radiusDp * d
+    private fun withAlpha(c: Int, a: Int) = Color.argb(a, Color.red(c), Color.green(c), Color.blue(c))
+
+    private fun boxed(fill: Int, stroke: Int?) = GradientDrawable().apply {
+        setColor(fill)
+        cornerRadius = 4f * d
+        if (stroke != null) setStroke(dp(1f).coerceAtLeast(1), stroke)
     }
 
-    /** Pill button background: rounded fill + ripple clipped to the shape. */
-    private fun pill(color: String, radiusDp: Float = 16f): RippleDrawable {
-        val content = roundRect(color, radiusDp)
-        return RippleDrawable(
-            ColorStateList.valueOf(Color.argb(70, 255, 255, 255)),
-            content, content
-        )
+    /** Outlined (off) or filled (on) squared neon button; safe to re-apply. */
+    fun neonButton(b: Button, accent: Int, filled: Boolean = false) {
+        val shape = if (filled) boxed(accent, accent) else boxed(PANEL, accent)
+        b.background = RippleDrawable(ColorStateList.valueOf(withAlpha(accent, 90)), shape, shape)
+        b.setTextColor(if (filled) BG else accent)
     }
 
-    /** Re-style an existing button (keeps ripple + radius; safe to re-apply). */
-    fun styleButton(b: Button, bg: String, fg: Int) {
-        b.background = pill(bg)
-        b.setTextColor(fg)
-    }
-
-    private fun Button.style(bg: String, fg: Int, sp: Float = 15f): Button = apply {
-        background = pill(bg)
-        setTextColor(fg)
+    private fun Button.neon(accent: Int, sp: Float = 13f, filled: Boolean = false): Button = apply {
+        neonButton(this, accent, filled)
         textSize = sp
-        typeface = Typeface.DEFAULT
-        isAllCaps = false
-        minHeight = dp(48f)
-        minimumHeight = dp(48f)
-        setPadding(dp(12f), 0, dp(12f), 0)
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        isAllCaps = true
+        stateListAnimator = null
+        elevation = 0f
+        minHeight = dp(44f)
+        minimumHeight = dp(44f)
+        setPadding(dp(8f), 0, dp(8f), 0)
     }
 
-    private fun card(): LinearLayout = LinearLayout(contextRef).apply {
+    private fun mono(sp: Float, color: Int, bold: Boolean = false) = TextView(ctx).apply {
+        textSize = sp
+        setTextColor(color)
+        typeface = Typeface.create(Typeface.MONOSPACE, if (bold) Typeface.BOLD else Typeface.NORMAL)
+    }
+
+    private fun header(title: String, accent: Int) = mono(11f, accent, bold = true).apply {
+        text = "[ $title ]"
+        letterSpacing = 0.08f
+        setPadding(0, 0, 0, dp(6f))
+    }
+
+    /** Color-blocked section: 1px stroke tinted to the section accent, no elevation. */
+    private fun panel(accent: Int): LinearLayout = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
-        background = roundRect("#10151e", 18f)
-        elevation = 2 * d
-        setPadding(dp(12f), dp(12f), dp(12f), dp(12f))
+        background = boxed(PANEL, withAlpha(accent, 200))
+        setPadding(dp(10f), dp(8f), dp(10f), dp(10f))
         layoutParams = LinearLayout.LayoutParams(-1, -2).apply {
             setMargins(0, 0, 0, dp(10f))
         }
     }
 
-    private lateinit var contextRef: Context
+    private fun lerpColor(a: Int, b: Int, t: Float): Int = Color.rgb(
+        (Color.red(a) + (Color.red(b) - Color.red(a)) * t).toInt(),
+        (Color.green(a) + (Color.green(b) - Color.green(a)) * t).toInt(),
+        (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).toInt(),
+    )
+
+    /** `BASS [██████----] 62%` with filled blocks graded cyan→magenta. */
+    fun setBar(label: TextView, name: String, percent: Int) {
+        val pct = percent.coerceIn(0, 100)
+        val filled = (pct * BAR_BLOCKS + 50) / 100
+        val sb = SpannableStringBuilder(name.padEnd(4)).append(" [")
+        for (i in 0 until BAR_BLOCKS) {
+            val start = sb.length
+            val on = i < filled
+            sb.append(if (on) '█' else '-')
+            val c = if (on) lerpColor(CYAN, MAGENTA, i / (BAR_BLOCKS - 1f)) else DIM
+            sb.setSpan(ForegroundColorSpan(c), start, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        sb.append("] ").append("$pct%".padStart(4))
+        label.text = sb
+    }
+
+    private fun logColor(line: String): Int {
+        val l = line.trimStart()
+        return when {
+            l.contains("FAIL", true) || l.startsWith("[ERR") -> RED
+            l.startsWith("[SWEEP") || l.startsWith("[UPDATE") || l.startsWith("[MBC") -> AMBER
+            l.startsWith("[MODEL") || l.startsWith("[LITERT") || l.startsWith("[GEMINI") ||
+                l.startsWith("[TFLITE") || l.startsWith("[HEURISTIC") ||
+                l.startsWith("[PROMPT") || l.startsWith("[APPLY") -> PURPLE
+            l.startsWith("[A/B") || l.startsWith("[2.FEEDBACK DAMP") -> MAGENTA
+            l.startsWith("[1.ACT") || l.startsWith("[OBSERVE") || l.startsWith("[2.FEEDBACK") -> CYAN
+            else -> LIME
+        }
+    }
+
+    /** Colorizes each log line by its `[TAG]` level. */
+    fun renderLog(lines: List<String>): CharSequence {
+        val sb = SpannableStringBuilder()
+        lines.forEachIndexed { i, line ->
+            if (i > 0) sb.append('\n')
+            val start = sb.length
+            sb.append(line)
+            sb.setSpan(
+                ForegroundColorSpan(logColor(line)), start, sb.length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+        return sb
+    }
+
+    private fun SeekBar.neonTint() = apply {
+        progressTintList = ColorStateList.valueOf(CYAN)
+        progressBackgroundTintList = ColorStateList.valueOf(DIM)
+        thumbTintList = ColorStateList.valueOf(MAGENTA)
+    }
 
     val scrollContainer = ScrollView(context).apply {
-        setBackgroundColor(Color.parseColor("#070a0f"))
+        setBackgroundColor(BG)
+        fitsSystemWindows = true
     }
     val root = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(16f), dp(12f), dp(16f), dp(14f))
+        setPadding(dp(14f), dp(12f), dp(14f), dp(10f))
     }
-    val titleLabel = TextView(context).apply {
-        textSize = 18f
-        setTextColor(Color.parseColor("#00ff66"))
-        typeface = Typeface.MONOSPACE
-        gravity = android.view.Gravity.CENTER
-    }
-    val statusLabel = TextView(context).apply {
-        textSize = 12f
-        setTextColor(Color.parseColor("#718096"))
-        typeface = Typeface.MONOSPACE
-        gravity = android.view.Gravity.CENTER
+    val titleLabel = mono(17f, CYAN, bold = true).apply { gravity = Gravity.CENTER }
+    val statusLabel = mono(11f, AMBER).apply {
+        gravity = Gravity.CENTER
         text = "BINDING HARDWARE ENGINE..."
     }
-    val npuStatusLabel = TextView(context).apply {
-        textSize = 12f
-        setTextColor(Color.parseColor("#38bdf8"))
-        typeface = Typeface.MONOSPACE
-        gravity = android.view.Gravity.CENTER
-        text = "CLOSED-LOOP DSP: READY (TAP MATRIX TO CYCLE MODE)"
-        setPadding(0, 2, 0, dp(8f))
+    val npuStatusLabel = mono(11f, PURPLE).apply {
+        gravity = Gravity.CENTER
+        text = "CLOSED-LOOP DSP: READY"
+        setPadding(0, dp(2f), 0, dp(10f))
     }
     val matrixVisualizer = MatrixSpectrographView(context).apply {
-        layoutParams = LinearLayout.LayoutParams(-1, dp(110f)).apply {
-            setMargins(0, 0, 0, dp(8f))
-        }
+        layoutParams = LinearLayout.LayoutParams(-1, dp(140f))
     }
     val visualizerView = RetroVisualizerView(context).apply {
-        layoutParams = LinearLayout.LayoutParams(-1, dp(110f))
+        layoutParams = LinearLayout.LayoutParams(-1, dp(140f))
     }
     val bitButtons = ArrayList<Button>()
-    val bassLabel = TextView(context).apply {
-        text = "Bass: 0%"
-        textSize = 12f
-        setTextColor(Color.parseColor("#ffaa00"))
-        typeface = Typeface.MONOSPACE
-    }
-    val bassBar = SeekBar(context).apply { max = 1000 }
-    val virtLabel = TextView(context).apply {
-        text = "3D: 0%"
-        textSize = 12f
-        setTextColor(Color.parseColor("#38bdf8"))
-        typeface = Typeface.MONOSPACE
-    }
-    val virtBar = SeekBar(context).apply { max = 1000 }
+    val bassLabel = mono(12f, CYAN)
+    val bassBar = SeekBar(context).apply { max = 1000 }.neonTint()
+    val virtLabel = mono(12f, CYAN)
+    val virtBar = SeekBar(context).apply { max = 1000 }.neonTint()
     val npuToggleBtn = Button(context)
     val resetBtn = Button(context)
     val sweepBtn = Button(context)
-    val crtHeader = TextView(context).apply {
-        text = "[●] --- [ DSP TELEMETRY ] ---"
-        textSize = 10f
-        setTextColor(Color.parseColor("#4ade80"))
-        typeface = Typeface.MONOSPACE
-        gravity = android.view.Gravity.CENTER
-        setPadding(0, dp(6f), 0, 2)
-    }
+    val crtHeader = header("DSP TELEMETRY", LIME).apply { textSize = 10f }
     val crtScrollView = ScrollView(context).apply {
         layoutParams = LinearLayout.LayoutParams(-1, dp(150f))
-        background = roundRect("#04070a", 12f)
-        setPadding(dp(12f), dp(6f), dp(12f), dp(6f))
+        background = boxed(WELL, null)
+        setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
     }
-    val crtLogView = TextView(context).apply {
-        textSize = 10f
-        setTextColor(Color.parseColor("#00ff66"))
-        typeface = Typeface.MONOSPACE
+    val crtLogView = mono(10f, LIME).apply {
         text = "[INIT] 60FPS Morphing + DSP Pipeline Ready."
     }
     val drawerLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         visibility = View.GONE
-        background = roundRect("#10151e", 18f)
-        elevation = 2 * d
-        setPadding(dp(14f), dp(14f), dp(14f), dp(14f))
-        layoutParams = LinearLayout.LayoutParams(-1, -2).apply {
-            setMargins(0, 0, 0, dp(10f))
-        }
+        setPadding(0, dp(8f), 0, 0)
     }
-    val dbStatsLabel = TextView(context).apply {
-        textSize = 12f
-        setTextColor(Color.parseColor("#94a3b8"))
-        typeface = Typeface.MONOSPACE
+    val dbStatsLabel = mono(11f, CYAN).apply {
         text = "SQLite: 0 snapshots"
         setPadding(0, 0, 0, dp(6f))
     }
-    val modelStatusLabel = TextView(context).apply {
-        textSize = 11f
-        setTextColor(Color.parseColor("#a78bfa"))
-        typeface = Typeface.MONOSPACE
-        setPadding(0, 4, 0, dp(8f))
-    }
+    val modelStatusLabel = mono(11f, PURPLE).apply { setPadding(0, dp(2f), 0, dp(8f)) }
     val modelBtn = Button(context)
     val promptInput = EditText(context).apply {
-        hint = "Type a tune, e.g. 'punchy kick, less harsh'"
-        setHintTextColor(Color.parseColor("#64748b"))
-        setTextColor(Color.parseColor("#00ff66"))
+        hint = "> punchy kick, less harsh"
+        setHintTextColor(DIM)
+        setTextColor(CYAN)
         textSize = 12f
         typeface = Typeface.MONOSPACE
-        background = roundRect("#04070a", 12f)
-        setPadding(dp(14f), 0, dp(14f), 0)
+        background = boxed(WELL, withAlpha(PURPLE, 160))
+        setPadding(dp(10f), 0, dp(10f), 0)
         setSingleLine(true)
     }
     val promptTuneBtn = Button(context)
     val analyzeBtn = Button(context)
     val heatmapBtn = Button(context)
     val clearDbBtn = Button(context)
-    val advisorResultLabel = TextView(context).apply {
-        textSize = 12f
-        setTextColor(Color.parseColor("#facc15"))
-        typeface = Typeface.MONOSPACE
+    val advisorResultLabel = mono(11f, MAGENTA).apply {
         text = "Tap ANALYZE for an on-device spectral read, or TUNE a prompt."
         setPadding(0, dp(8f), 0, dp(8f))
     }
@@ -185,196 +222,164 @@ class EqUiHolders(context: Context) {
     val tipBtn = Button(context)
     val updateBtn = Button(context)
 
-    init {
-        contextRef = context
+    private fun row(vararg views: Pair<View, Float>, gapDp: Float = 6f) =
+        LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            views.forEachIndexed { i, (v, w) ->
+                v.layoutParams = LinearLayout.LayoutParams(0, dp(48f), w).apply {
+                    if (i > 0) marginStart = dp(gapDp)
+                }
+                addView(v)
+            }
+        }
 
+    private fun fullWidth(b: Button, topDp: Float = 0f) {
+        b.layoutParams = LinearLayout.LayoutParams(-1, dp(48f)).apply {
+            setMargins(0, dp(topDp), 0, dp(8f))
+        }
+    }
+
+    init {
         scrollContainer.addView(root)
         root.addView(titleLabel)
         root.addView(statusLabel)
         root.addView(npuStatusLabel)
 
-        val vizCard = card()
-        vizCard.addView(matrixVisualizer)
-        vizCard.addView(visualizerView)
-        root.addView(vizCard)
+        // Visualizer: one view at a time. Tap header to swap; tapping the matrix
+        // cycles its modes and wraps back to the EQ curve after the last one.
+        // (The EQ curve itself consumes touches for node drag / bypass.)
+        val vizPanel = panel(CYAN)
+        val vizHeader = header("EQ CURVE", CYAN).apply {
+            minHeight = dp(32f)
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+        }
+        fun showCurve(curve: Boolean) {
+            visualizerView.visibility = if (curve) View.VISIBLE else View.GONE
+            matrixVisualizer.visibility = if (curve) View.GONE else View.VISIBLE
+            vizHeader.text = if (curve) "[ EQ CURVE ]  ⇄ TAP" else "[ SPECTRUM ]  ⇄ TAP"
+        }
+        vizHeader.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            showCurve(visualizerView.visibility != View.VISIBLE)
+        }
         matrixVisualizer.setOnClickListener {
-            it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+            it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            val last = matrixVisualizer.currentMode ==
+                MatrixSpectrographView.VisualMode.entries.last()
             matrixVisualizer.cycleNextMode()
+            if (last) showCurve(true)
         }
+        vizPanel.addView(vizHeader)
+        vizPanel.addView(visualizerView)
+        vizPanel.addView(matrixVisualizer)
+        showCurve(true)
+        root.addView(vizPanel)
 
-        val bitRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            weightSum = 4f
-        }
+        // DSP: 4-bit preset register + bass/3D bars in one section.
+        val dspPanel = panel(MAGENTA)
+        dspPanel.addView(header("DSP", MAGENTA))
+        val bitRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
         for (i in 3 downTo 0) {
-            val btn = Button(context).apply {
-                layoutParams = LinearLayout.LayoutParams(0, dp(56f), 1f).apply {
-                    setMargins(dp(4f), 0, dp(4f), 0)
+            val btn = Button(context).neon(LIME, 13f).apply {
+                layoutParams = LinearLayout.LayoutParams(0, dp(52f), 1f).apply {
+                    if (i != 3) marginStart = dp(6f)
                 }
-                typeface = Typeface.MONOSPACE
-            }.style("#1f2937", Color.parseColor("#9ca3af"), 14f).apply {
-                typeface = Typeface.MONOSPACE
             }
             bitButtons.add(btn)
             bitRow.addView(btn)
         }
-        val bitCard = card()
-        bitCard.addView(bitRow)
-        root.addView(bitCard)
+        dspPanel.addView(bitRow)
+        setBar(bassLabel, "BASS", 0)
+        setBar(virtLabel, "3D", 0)
+        bassLabel.setPadding(0, dp(10f), 0, 0)
+        virtLabel.setPadding(0, dp(6f), 0, 0)
+        dspPanel.addView(bassLabel)
+        dspPanel.addView(bassBar)
+        dspPanel.addView(virtLabel)
+        dspPanel.addView(virtBar)
+        root.addView(dspPanel)
 
-        val sliderRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            weightSum = 2f
-        }
-        val bassCol = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-            addView(bassLabel)
-            addView(bassBar)
-        }
-        val virtCol = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-            addView(virtLabel)
-            addView(virtBar)
-        }
-        sliderRow.addView(bassCol)
-        sliderRow.addView(virtCol)
-        val sliderCard = card()
-        sliderCard.addView(sliderRow)
-        root.addView(sliderCard)
+        // Control: [SWEEP] [FLAT] [AUTO], each its own accent.
+        val ctlPanel = panel(AMBER)
+        ctlPanel.addView(header("CONTROL", AMBER))
+        sweepBtn.neon(AMBER).text = "[SWEEP]"
+        resetBtn.neon(MAGENTA).text = "[FLAT]"
+        npuToggleBtn.neon(LIME).text = "[AUTO]"
+        ctlPanel.addView(row(sweepBtn to 1f, resetBtn to 1f, npuToggleBtn to 1f))
+        root.addView(ctlPanel)
 
-        val actionRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            weightSum = 3f
-        }
-        npuToggleBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(56f), 1.15f).apply {
-                setMargins(0, 0, dp(4f), 0)
-            }
-            text = "Auto: off"
-        }.style("#1e293b", Color.WHITE, 13f)
-        sweepBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(56f), 0.95f).apply {
-                setMargins(dp(4f), 0, dp(4f), 0)
-            }
-            text = "Sweep"
-        }.style("#38bdf8", Color.BLACK, 13f)
-        resetBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(56f), 0.9f).apply {
-                setMargins(dp(4f), 0, 0, 0)
-            }
-            text = "Flat"
-        }.style("#ffaa00", Color.BLACK, 13f)
-        actionRow.addView(npuToggleBtn)
-        actionRow.addView(sweepBtn)
-        actionRow.addView(resetBtn)
-        val actionCard = card()
-        actionCard.addView(actionRow)
-        root.addView(actionCard)
-
-        val crtCard = card()
-        crtCard.addView(crtHeader)
+        val crtPanel = panel(LIME)
+        crtPanel.addView(crtHeader)
         crtScrollView.addView(crtLogView)
-        crtCard.addView(crtScrollView)
-        root.addView(crtCard)
+        crtPanel.addView(crtScrollView)
+        root.addView(crtPanel)
 
-        val drawerToggle = Button(context).apply {
-            layoutParams = LinearLayout.LayoutParams(-1, dp(52f)).apply {
-                setMargins(0, 0, 0, dp(10f))
-            }
-            text = "Telemetry & AI advisor ▾"
-        }.style("#1e293b", Color.parseColor("#7dd3fc"), 14f)
+        updateBtn.neon(AMBER, filled = true).text = "Update available"
+        updateBtn.visibility = View.GONE
+        fullWidth(updateBtn)
+        root.addView(updateBtn)
+
+        // [ LOG / AI ] drawer, closed by default.
+        val aiPanel = panel(PURPLE)
+        val drawerToggle = header("LOG / AI", PURPLE).apply {
+            text = "[ LOG / AI ] ▾"
+            minHeight = dp(40f)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 0)
+            isClickable = true
+        }
         drawerToggle.setOnClickListener {
-            it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+            it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
             val open = drawerLayout.visibility != View.VISIBLE
             drawerLayout.visibility = if (open) View.VISIBLE else View.GONE
-            drawerToggle.text =
-                if (open) "Telemetry & AI advisor ▴" else "Telemetry & AI advisor ▾"
+            drawerToggle.text = if (open) "[ LOG / AI ] ▴" else "[ LOG / AI ] ▾"
         }
-        root.addView(drawerToggle)
+        aiPanel.addView(drawerToggle)
 
         drawerLayout.addView(dbStatsLabel)
         drawerLayout.addView(modelStatusLabel)
-        modelBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(-1, dp(56f)).apply {
-                setMargins(0, 0, 0, dp(8f))
-            }
-            text = "Get Gemma model (584 MB)"
-        }.style("#a78bfa", Color.BLACK, 14f)
+        modelBtn.neon(PURPLE).text = "Get Gemma model (584 MB)"
+        fullWidth(modelBtn)
         drawerLayout.addView(modelBtn)
 
-        val promptRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            weightSum = 4f
-            setPadding(0, dp(4f), 0, dp(8f))
-        }
-        promptInput.layoutParams = LinearLayout.LayoutParams(0, dp(56f), 3.1f).apply {
-            setMargins(0, 0, dp(6f), 0)
-        }
-        promptTuneBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(56f), 0.9f)
-            text = "Tune"
-        }.style("#00f2fe", Color.BLACK, 14f)
-        promptRow.addView(promptInput)
-        promptRow.addView(promptTuneBtn)
-        drawerLayout.addView(promptRow)
+        promptTuneBtn.neon(PURPLE, filled = true).text = "[TUNE]"
+        drawerLayout.addView(
+            row(promptInput to 3f, promptTuneBtn to 1.1f).apply { setPadding(0, 0, 0, dp(8f)) }
+        )
 
-        val advRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            weightSum = 3f
-            setPadding(0, dp(6f), 0, dp(8f))
-        }
-        analyzeBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(56f), 1.1f).apply {
-                setMargins(0, 0, dp(4f), 0)
-            }
-            text = "Analyze"
-        }.style("#6366f1", Color.WHITE, 13f)
-        heatmapBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(56f), 1.1f).apply {
-                setMargins(dp(4f), 0, dp(4f), 0)
-            }
-            text = "Logbook"
-        }.style("#38bdf8", Color.BLACK, 13f)
-        clearDbBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(56f), 0.8f).apply {
-                setMargins(dp(4f), 0, 0, 0)
-            }
-            text = "Purge"
-        }.style("#dc2626", Color.WHITE, 13f)
-        advRow.addView(analyzeBtn)
-        advRow.addView(heatmapBtn)
-        advRow.addView(clearDbBtn)
-        drawerLayout.addView(advRow)
+        analyzeBtn.neon(PURPLE, 12f).text = "[ANALYZE]"
+        heatmapBtn.neon(CYAN, 12f).text = "[LOGBOOK]"
+        clearDbBtn.neon(RED, 12f).text = "[PURGE]"
+        drawerLayout.addView(row(analyzeBtn to 1.15f, heatmapBtn to 1.15f, clearDbBtn to 0.9f))
         drawerLayout.addView(advisorResultLabel)
 
-        applyRecBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(-1, dp(56f)).apply {
-                setMargins(0, 0, 0, dp(8f))
-            }
-            text = "Apply recommended preset"
-            visibility = View.GONE
-        }.style("#00ff66", Color.BLACK, 14f)
+        applyRecBtn.neon(LIME, filled = true).text = "Apply recommended preset"
+        applyRecBtn.visibility = View.GONE
+        fullWidth(applyRecBtn)
         drawerLayout.addView(applyRecBtn)
 
+        aiPanel.addView(drawerLayout)
+        root.addView(aiPanel)
+
+        // Ko-fi: small footer link.
         tipBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(-1, dp(56f)).apply {
-                setMargins(0, dp(10f), 0, 0)
-            }
-            text = "Support on Ko-fi"
-        }.style("#facc15", Color.BLACK, 18f)
-        drawerLayout.addView(tipBtn)
-
-        updateBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(-1, dp(56f)).apply {
-                setMargins(0, dp(10f), 0, 0)
-            }
-            text = "Update available"
-            visibility = View.GONE
-        }.style("#38bdf8", Color.BLACK, 16f)
-        drawerLayout.addView(updateBtn)
-
-        root.addView(drawerLayout)
+            text = "<3 ko-fi.com/indodankabis"
+            isAllCaps = false
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+            setTextColor(withAlpha(MAGENTA, 200))
+            background = RippleDrawable(
+                ColorStateList.valueOf(withAlpha(MAGENTA, 60)), null, ColorDrawable(Color.WHITE)
+            )
+            stateListAnimator = null
+            minHeight = dp(36f)
+            minimumHeight = dp(36f)
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(dp(8f), 0, dp(8f), 0)
+            layoutParams = LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL }
+        }
+        root.addView(tipBtn)
     }
 }

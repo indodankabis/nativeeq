@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
-import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -136,7 +135,7 @@ class MainActivity : Activity() {
         ui.bassBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
                 if (fromUser) {
-                    ui.bassLabel.text = "BASS: ${p / 10}%"
+                    ui.setBar(ui.bassLabel, "BASS", p / 10)
                     startService(
                         Intent(this@MainActivity, EqualizerService::class.java).apply {
                             action = EqualizerService.ACTION_SET_BASS
@@ -152,7 +151,7 @@ class MainActivity : Activity() {
         ui.virtBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
                 if (fromUser) {
-                    ui.virtLabel.text = "3D: ${p / 10}%"
+                    ui.setBar(ui.virtLabel, "3D", p / 10)
                     startService(
                         Intent(this@MainActivity, EqualizerService::class.java).apply {
                             action = EqualizerService.ACTION_SET_VIRT
@@ -168,11 +167,8 @@ class MainActivity : Activity() {
         ui.npuToggleBtn.setOnClickListener {
             it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
             isNpuAutoMode = !isNpuAutoMode
-            ui.npuToggleBtn.text = if (isNpuAutoMode) "Auto: on" else "Auto: off"
-            ui.styleButton(
-                ui.npuToggleBtn,
-                if (isNpuAutoMode) "#0284c7" else "#1e293b", Color.WHITE
-            )
+            ui.npuToggleBtn.text = if (isNpuAutoMode) "[AUTO:ON]" else "[AUTO]"
+            ui.neonButton(ui.npuToggleBtn, EqUiHolders.LIME, filled = isNpuAutoMode)
         }
         ui.resetBtn.setOnClickListener {
             it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
@@ -322,7 +318,7 @@ class MainActivity : Activity() {
                 val us = DirectAcousticBus.readMicBands(FloatArray(5))
                 ui.crtHeader.text =
                     (if (blinkState) "[●]" else "[○]") +
-                        " --- [ DIRECT-BUS: ${us}µs | GOERTZEL RTA ] ---"
+                        " [ DSP TELEMETRY ] BUS ${us}µs · GOERTZEL"
                 if (isNpuAutoMode) {
                     ui.visualizerView.setTargetGains(gains)
                 }
@@ -497,7 +493,7 @@ class MainActivity : Activity() {
             synchronized(terminalLines) {
                 if (terminalLines.size >= maxLogLines) terminalLines.removeFirst()
                 terminalLines.add(line)
-                ui.crtLogView.text = terminalLines.joinToString("\n")
+                ui.crtLogView.text = ui.renderLog(terminalLines)
             }
             ui.crtScrollView.post { ui.crtScrollView.fullScroll(View.FOCUS_DOWN) }
         }
@@ -559,10 +555,7 @@ class MainActivity : Activity() {
             val isSet = (1 shl bitIndex) and safeState != 0
             val btn = ui.bitButtons[i]
             btn.text = "B$bitIndex\n${if (isSet) "1" else "0"}"
-            ui.styleButton(
-                btn, if (isSet) "#00ff66" else "#1f2937",
-                if (isSet) Color.BLACK else Color.parseColor("#9ca3af")
-            )
+            ui.neonButton(btn, EqUiHolders.LIME, filled = isSet)
         }
         if (!isNpuAutoMode) {
             EqualizerService.profiles.getOrNull(safeState)?.let {
