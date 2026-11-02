@@ -166,11 +166,8 @@ class EqUiHolders(context: Context) {
         text = "CLOSED-LOOP DSP: READY"
         setPadding(0, dp(2f), 0, dp(10f))
     }
-    val matrixVisualizer = MatrixSpectrographView(context).apply {
-        layoutParams = LinearLayout.LayoutParams(-1, dp(140f))
-    }
     val visualizerView = RetroVisualizerView(context).apply {
-        layoutParams = LinearLayout.LayoutParams(-1, dp(140f))
+        layoutParams = LinearLayout.LayoutParams(-1, dp(190f))
     }
     val bitButtons = ArrayList<Button>()
     val bassLabel = mono(12f, CYAN)
@@ -245,35 +242,21 @@ class EqUiHolders(context: Context) {
         root.addView(statusLabel)
         root.addView(npuStatusLabel)
 
-        // Visualizer: one view at a time. Tap header to swap; tapping the matrix
-        // cycles its modes and wraps back to the EQ curve after the last one.
-        // (The EQ curve itself consumes touches for node drag / bypass.)
+        // Visualizer: tap the header to cycle the background layer; the EQ curve
+        // stays draggable in every mode.
         val vizPanel = panel(CYAN)
-        val vizHeader = header("EQ CURVE", CYAN).apply {
+        val vizHeader = header("VIZ", CYAN).apply {
             minHeight = dp(32f)
             gravity = Gravity.CENTER_VERTICAL
             isClickable = true
-        }
-        fun showCurve(curve: Boolean) {
-            visualizerView.visibility = if (curve) View.VISIBLE else View.GONE
-            matrixVisualizer.visibility = if (curve) View.GONE else View.VISIBLE
-            vizHeader.text = if (curve) "[ EQ CURVE ]  ⇄ TAP" else "[ SPECTRUM ]  ⇄ TAP"
+            text = "[ VIZ · ${visualizerView.mode.name} ]  ⇄ TAP"
         }
         vizHeader.setOnClickListener {
             it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            showCurve(visualizerView.visibility != View.VISIBLE)
-        }
-        matrixVisualizer.setOnClickListener {
-            it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            val last = matrixVisualizer.currentMode ==
-                MatrixSpectrographView.VisualMode.entries.last()
-            matrixVisualizer.cycleNextMode()
-            if (last) showCurve(true)
+            vizHeader.text = "[ VIZ · ${visualizerView.cycleMode().name} ]  ⇄ TAP"
         }
         vizPanel.addView(vizHeader)
         vizPanel.addView(visualizerView)
-        vizPanel.addView(matrixVisualizer)
-        showCurve(true)
         root.addView(vizPanel)
 
         // DSP: 4-bit preset register + bass/3D bars in one section.

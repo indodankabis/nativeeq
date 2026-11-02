@@ -87,7 +87,6 @@ class MainActivity : Activity() {
                 if (now - lastTelemetryUiMs >= 100) {
                     lastTelemetryUiMs = now
                     runOnUiThread {
-                        ui.matrixVisualizer.updateSpectralBands(low, med, high)
                         ui.visualizerView.updateSpectralTriplet(low, med, high)
                     }
                 }
@@ -419,7 +418,6 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     ui.visualizerView.updateMicBands(bands)
                     if (micLow + micMed + micHigh > 0.03f) {
-                        ui.matrixVisualizer.updateSpectralBands(micLow, micMed, micHigh)
                         ui.visualizerView.updateSpectralTriplet(micLow, micMed, micHigh)
                     }
                 }
@@ -566,8 +564,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        ui.matrixVisualizer.isPaused = false
-        ui.matrixVisualizer.postInvalidateOnAnimation()
+        ui.visualizerView.isPaused = false
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == 0) {
             micAnalyzer.start()
         }
@@ -581,7 +578,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
-        ui.matrixVisualizer.isPaused = true
+        ui.visualizerView.isPaused = true
         micAnalyzer.stop()
         unregisterReceiver(receiver)
     }
