@@ -18,8 +18,9 @@ class AudioTap(
 
     fun start(): Boolean {
         if (viz != null) return true
+        var v: Visualizer? = null
         return try {
-            val v = Visualizer(0)
+            v = Visualizer(0)
             v.enabled = false
             v.captureSize = Visualizer.getCaptureSizeRange()[1].coerceAtMost(1024)
             v.setDataCaptureListener(object : Visualizer.OnDataCaptureListener {
@@ -32,6 +33,7 @@ class AudioTap(
             viz = v
             true
         } catch (t: Throwable) {
+            v?.let { runCatching { it.release() } }
             viz = null
             false
         }
