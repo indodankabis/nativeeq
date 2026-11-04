@@ -668,11 +668,13 @@ class HypnoVisualizerView @JvmOverloads constructor(
 
     companion object {
         private val SYMS = intArrayOf(1, 2, 3, 4, 5, 6, 8)
+        private val GENES = listOf("zoom", "rot", "swirl", "warp", "decay", "hue", "drift",
+            "shape", "sym", "mirror", "palette", "kick", "flash")
 
         /** Thread-safe check that a model reply holds a flavor JSON object [parseFlavor] can use. */
         fun isFlavorJson(raw: String): Boolean = runCatching {
             val j = org.json.JSONObject(raw.substring(raw.indexOf('{'), raw.lastIndexOf('}') + 1))
-            listOf("zoom", "shape", "decay", "palette").any { j.has(it) }
+            GENES.any { j.has(it) }
         }.getOrDefault(false)
     }
 }
