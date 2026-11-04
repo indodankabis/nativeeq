@@ -104,6 +104,27 @@ class RetroVisualizerView @JvmOverloads constructor(
     private var phase = 0f
     private var beat = 0f
     private var prevLow = 0f
+    private val fftBars = FloatArray(28)
+    private var lastFftMs = 0L
+
+    /** Real FFT frame from [AudioTap]: 28 log-spaced bars, 30 Hz – 16 kHz. */
+    fun updateFft(fft: ByteArray, samplingRateMilliHz: Int) {
+        val n = fft.size
+        if (n < 8 || samplingRateMilliHz <= 0) return
+        val binHz = samplingRateMilliHz / 1000f / n
+        var any = false
+        for (b in fftBars.indices) {
+            val f0 = 30f * Math.pow(16000.0 / 30.0, b / 28.0).toFloat()
+            val f1 = 30f * Math.pow(16000.0 / 30.0, (b + 1) / 28.0).toFloat()
+            val k0 = (f0 / binHz).toInt().coerceIn(1, n / 2 - 1)
+            val k1 = (f1 / binHz).toInt().coerceIn(k0, n / 2 - 1)
+            var m = 0f
+            for (k in k0..k1) m = max(m, AudioTap.mag(fft, k))
+            fftBars[b] = AudioTap.level(m)
+            if (fftBars[b] > 0.15f) any = true
+        }
+        if (any) lastFftMs = System.currentTimeMillis()
+    }
     private var lastFrameNs = 0L
     private var lastSignalMs = 0L
     private var blinkMs = 0f
@@ -250,11 +271,13 @@ class RetroVisualizerView @JvmOverloads constructor(
             dispGain[i] += (g - dispGain[i]) * if (i == activeBand) 1f else k(dt, 0.07f)
             if (rawTarget[i] > 0.08f || micTarget[i] > 0.05f) signal = true
         }
-        if (signal) lastSignalMs = System.currentTimeMillis()
+        val fftLive = System.currentTimeMillis() - lastFftMs < 400
+        if (signal || fftLive) lastSignalMs = System.currentTimeMillis()
         var over = 0f
         for (i in 0 until nBars) {
             val bx = (i + 0.5f) / nBars * 5f - 0.5f
-            val level = (sample(raw, bx) + sample(dispGain, bx) / 4000f).coerceIn(0f, 1.1f)
+            val src = if (fftLive) fftBars[i] else sample(raw, bx)
+            val level = (src + sample(dispGain, bx) / 4000f).coerceIn(0f, 1.1f)
             if (level > 0.85f) over = max(over, level - 0.85f)
             val v = min(level, 1f)
             bars[i] += (v - bars[i]) * k(dt, if (v > bars[i]) 0.03f else 0.18f)

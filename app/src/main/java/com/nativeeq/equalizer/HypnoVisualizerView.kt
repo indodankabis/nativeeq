@@ -159,6 +159,42 @@ class HypnoVisualizerView @JvmOverloads constructor(
         lowAvg += (lowT - lowAvg) * 0.08f
     }
 
+    private val realWave = FloatArray(96)
+    private var waveGain = 1f
+    private var lastWaveMs = 0L
+
+    /** Real PCM frame from [AudioTap] (unsigned 8-bit, 128 = 0). Auto-gained to fill the shape. */
+    fun updateWaveform(w: ByteArray) {
+        if (w.isEmpty()) return
+        var peak = 0f
+        for (i in realWave.indices) {
+            val v = ((w[i * w.size / realWave.size].toInt() and 0xff) - 128) / 128f
+            realWave[i] = v
+            peak = max(peak, abs(v))
+        }
+        if (peak < 0.01f) return
+        waveGain += ((0.9f / peak).coerceIn(1f, 12f) - waveGain) * 0.1f
+        lastWaveMs = System.currentTimeMillis()
+    }
+
+    /** Real FFT frame from [AudioTap]: drives low/mid/high when the DSP telemetry is idle. */
+    fun updateFft(fft: ByteArray, samplingRateMilliHz: Int) {
+        val n = fft.size
+        if (n < 8 || samplingRateMilliHz <= 0) return
+        val binHz = samplingRateMilliHz / 1000f / n
+        var l = 0f; var m = 0f; var h = 0f
+        for (k in 1 until n / 2) {
+            val f = k * binHz
+            val v = AudioTap.level(AudioTap.mag(fft, k))
+            when {
+                f < 250f -> l = max(l, v)
+                f < 4000f -> m = max(m, v)
+                else -> h = max(h, v)
+            }
+        }
+        if (l + m + h > 0.05f) updateSpectralBands(l, m, h)
+    }
+
     // ── buffers ──────────────────────────────────────────────────────────────
     private var front: Bitmap? = null
     private var back: Bitmap? = null
@@ -341,6 +377,10 @@ class HypnoVisualizerView @JvmOverloads constructor(
 
     /** Pseudo-waveform from the three bands (only band energies are available). */
     private fun synth() {
+        if (System.currentTimeMillis() - lastWaveMs < 300) {
+            for (i in 0 until N) samples[i] += (realWave[i] * waveGain * 0.8f - samples[i]) * 0.5f
+            return
+        }
         for (i in 0 until N) {
             val x = i / N.toFloat() * 2f * PI.toFloat()
             samples[i] = low * sin(x + t * 2f) * 0.6f +

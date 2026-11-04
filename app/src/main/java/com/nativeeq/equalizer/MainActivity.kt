@@ -24,6 +24,22 @@ class MainActivity : Activity() {
     private var eqService: EqualizerService? = null
     private var npuAgent: NpuAudioAgent? = null
     private val micAnalyzer = RoomMicAnalyzer()
+    private val audioTap = AudioTap(
+        onWave = { ui.hypnoView.updateWaveform(it) },
+        onFft = { fft, sr ->
+            ui.hypnoView.updateFft(fft, sr)
+            ui.visualizerView.updateFft(fft, sr)
+        },
+    )
+    private var audioTapLogged = false
+
+    private fun startAudioTap() {
+        val live = audioTap.start()
+        if (!audioTapLogged) {
+            audioTapLogged = true
+            appendLog(if (live) "[VIZ] Output tap live: real waveform + FFT" else "[VIZ] Output tap unavailable; using DSP bands")
+        }
+    }
     private val sweeper = AcousticSweeper()
     private val genreClassifier = AcousticGenreClassifier()
     private val transferEngine = AcousticTransferEngine()
@@ -524,6 +540,7 @@ class MainActivity : Activity() {
             android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
             startAndBindEngine()
+            startAudioTap()
         }
     }
 
@@ -570,6 +587,7 @@ class MainActivity : Activity() {
         ui.hypnoView.isPaused = false
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == 0) {
             micAnalyzer.start()
+            startAudioTap()
         }
         val filter = IntentFilter(EqualizerService.ACTION_STATE_CHANGED)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -584,6 +602,7 @@ class MainActivity : Activity() {
         ui.visualizerView.isPaused = true
         ui.hypnoView.isPaused = true
         micAnalyzer.stop()
+        audioTap.stop()
         unregisterReceiver(receiver)
     }
 
