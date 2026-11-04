@@ -10,6 +10,7 @@ object NanoBackend {
         prompt: String,
         onToken: (String) -> Unit,
         parse: (String, String) -> LiteRtLmAcousticEngine.LmResponse?,
+        contract: String = LiteRtLmAcousticEngine.RESPONSE_CONTRACT,
     ): LiteRtLmAcousticEngine.LmResponse? {
         onToken("[GEMINI-NANO] excluded from FOSS build (proprietary dep)")
         return null

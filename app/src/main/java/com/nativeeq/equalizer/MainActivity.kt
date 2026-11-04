@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
-import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -25,6 +24,22 @@ class MainActivity : Activity() {
     private var eqService: EqualizerService? = null
     private var npuAgent: NpuAudioAgent? = null
     private val micAnalyzer = RoomMicAnalyzer()
+    private val audioTap = AudioTap(
+        onWave = { ui.hypnoView.updateWaveform(it) },
+        onFft = { fft, sr ->
+            ui.hypnoView.updateFft(fft, sr)
+            ui.visualizerView.updateFft(fft, sr)
+        },
+    )
+    private var audioTapLogged = false
+
+    private fun startAudioTap() {
+        val live = audioTap.start()
+        if (!audioTapLogged) {
+            audioTapLogged = true
+            appendLog(if (live) "[VIZ] Output tap live: real waveform + FFT" else "[VIZ] Output tap unavailable; using DSP bands")
+        }
+    }
     private val sweeper = AcousticSweeper()
     private val genreClassifier = AcousticGenreClassifier()
     private val transferEngine = AcousticTransferEngine()
@@ -88,7 +103,7 @@ class MainActivity : Activity() {
                 if (now - lastTelemetryUiMs >= 100) {
                     lastTelemetryUiMs = now
                     runOnUiThread {
-                        ui.matrixVisualizer.updateSpectralBands(low, med, high)
+                        ui.hypnoView.updateSpectralBands(low, med, high)
                         ui.visualizerView.updateSpectralTriplet(low, med, high)
                     }
                 }
@@ -119,6 +134,17 @@ class MainActivity : Activity() {
         setContentView(ui.scrollContainer)
         dbHelper = TelemetryDbHelper(this)
         lmEngine = LiteRtLmAcousticEngine(this)
+        ui.hypnoView.onFullscreenToggle = { toggleVizFullscreen() }
+        ui.hypnoView.onAiRequest = {
+            val prompt = ui.hypnoView.flavorPrompt(genreClassifier.currentArchetype.name)
+            lmEngine.generateRawAsync(prompt, HypnoVisualizerView::isFlavorJson) { raw, tag ->
+                runOnUiThread {
+                    val f = raw?.let { ui.hypnoView.parseFlavor(it) }
+                    ui.hypnoView.finishAi(f, tag)
+                    appendLog(if (f != null) "[VIZ] [$tag] wrote flavor ${f.name}" else "[VIZ] No LM flavor; evolved locally")
+                }
+            }
+        }
         logbook = TuningLogbook(this)
         npuAgent = NpuAudioAgent(this).apply {
             onTelemetryListener = { gains, msg, logLine, low, med, high -> onAgentTick(gains, msg, logLine, low, med, high) }
@@ -136,7 +162,7 @@ class MainActivity : Activity() {
         ui.bassBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
                 if (fromUser) {
-                    ui.bassLabel.text = "BASS: ${p / 10}%"
+                    ui.setBar(ui.bassLabel, "BASS", p / 10)
                     startService(
                         Intent(this@MainActivity, EqualizerService::class.java).apply {
                             action = EqualizerService.ACTION_SET_BASS
@@ -152,7 +178,7 @@ class MainActivity : Activity() {
         ui.virtBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
                 if (fromUser) {
-                    ui.virtLabel.text = "3D: ${p / 10}%"
+                    ui.setBar(ui.virtLabel, "3D", p / 10)
                     startService(
                         Intent(this@MainActivity, EqualizerService::class.java).apply {
                             action = EqualizerService.ACTION_SET_VIRT
@@ -168,11 +194,8 @@ class MainActivity : Activity() {
         ui.npuToggleBtn.setOnClickListener {
             it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
             isNpuAutoMode = !isNpuAutoMode
-            ui.npuToggleBtn.text = if (isNpuAutoMode) "Auto: on" else "Auto: off"
-            ui.styleButton(
-                ui.npuToggleBtn,
-                if (isNpuAutoMode) "#0284c7" else "#1e293b", Color.WHITE
-            )
+            ui.npuToggleBtn.text = if (isNpuAutoMode) "[AUTO:ON]" else "[AUTO]"
+            ui.neonButton(ui.npuToggleBtn, EqUiHolders.LIME, filled = isNpuAutoMode)
         }
         ui.resetBtn.setOnClickListener {
             it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
@@ -322,7 +345,7 @@ class MainActivity : Activity() {
                 val us = DirectAcousticBus.readMicBands(FloatArray(5))
                 ui.crtHeader.text =
                     (if (blinkState) "[●]" else "[○]") +
-                        " --- [ DIRECT-BUS: ${us}µs | GOERTZEL RTA ] ---"
+                        " [ DSP TELEMETRY ] BUS ${us}µs · GOERTZEL"
                 if (isNpuAutoMode) {
                     ui.visualizerView.setTargetGains(gains)
                 }
@@ -423,7 +446,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     ui.visualizerView.updateMicBands(bands)
                     if (micLow + micMed + micHigh > 0.03f) {
-                        ui.matrixVisualizer.updateSpectralBands(micLow, micMed, micHigh)
+                        ui.hypnoView.updateSpectralBands(micLow, micMed, micHigh)
                         ui.visualizerView.updateSpectralTriplet(micLow, micMed, micHigh)
                     }
                 }
@@ -497,7 +520,7 @@ class MainActivity : Activity() {
             synchronized(terminalLines) {
                 if (terminalLines.size >= maxLogLines) terminalLines.removeFirst()
                 terminalLines.add(line)
-                ui.crtLogView.text = terminalLines.joinToString("\n")
+                ui.crtLogView.text = ui.renderLog(terminalLines)
             }
             ui.crtScrollView.post { ui.crtScrollView.fullScroll(View.FOCUS_DOWN) }
         }
@@ -528,6 +551,7 @@ class MainActivity : Activity() {
             android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
             startAndBindEngine()
+            startAudioTap()
         }
     }
 
@@ -559,10 +583,7 @@ class MainActivity : Activity() {
             val isSet = (1 shl bitIndex) and safeState != 0
             val btn = ui.bitButtons[i]
             btn.text = "B$bitIndex\n${if (isSet) "1" else "0"}"
-            ui.styleButton(
-                btn, if (isSet) "#00ff66" else "#1f2937",
-                if (isSet) Color.BLACK else Color.parseColor("#9ca3af")
-            )
+            ui.neonButton(btn, EqUiHolders.LIME, filled = isSet)
         }
         if (!isNpuAutoMode) {
             EqualizerService.profiles.getOrNull(safeState)?.let {
@@ -573,10 +594,11 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        ui.matrixVisualizer.isPaused = false
-        ui.matrixVisualizer.postInvalidateOnAnimation()
+        ui.visualizerView.isPaused = false
+        ui.hypnoView.isPaused = false
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == 0) {
             micAnalyzer.start()
+            startAudioTap()
         }
         val filter = IntentFilter(EqualizerService.ACTION_STATE_CHANGED)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -588,12 +610,52 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
-        ui.matrixVisualizer.isPaused = true
+        ui.visualizerView.isPaused = true
+        ui.hypnoView.isPaused = true
         micAnalyzer.stop()
+        audioTap.stop()
         unregisterReceiver(receiver)
     }
 
+    private var vizFullscreen: android.app.Dialog? = null
+
+    /** Moves the visualizer into an immersive, screen-on dialog and back. */
+    private fun toggleVizFullscreen() {
+        vizFullscreen?.let { it.dismiss(); return }
+        val v = ui.hypnoView
+        val parent = v.parent as? android.view.ViewGroup ?: return
+        val idx = parent.indexOfChild(v)
+        val lp = v.layoutParams
+        parent.removeView(v)
+        val dlg = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        dlg.setContentView(v, android.view.ViewGroup.LayoutParams(-1, -1))
+        dlg.setOnDismissListener {
+            (v.parent as? android.view.ViewGroup)?.removeView(v)
+            parent.addView(v, idx, lp)
+            v.isFullscreen = false
+            vizFullscreen = null
+        }
+        v.isFullscreen = true
+        vizFullscreen = dlg
+        dlg.show()
+        dlg.window?.let { w ->
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (Build.VERSION.SDK_INT >= 30) {
+                w.insetsController?.let {
+                    it.hide(android.view.WindowInsets.Type.systemBars())
+                    it.systemBarsBehavior =
+                        android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                w.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                    android.view.View.SYSTEM_UI_FLAG_FULLSCREEN or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            }
+        }
+    }
+
     override fun onDestroy() {
+        vizFullscreen?.dismiss()
         super.onDestroy()
         if (isBound) {
             EqualizerService.onTelemetryListener = null

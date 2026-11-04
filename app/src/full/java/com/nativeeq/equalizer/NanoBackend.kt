@@ -11,6 +11,7 @@ object NanoBackend {
         prompt: String,
         onToken: (String) -> Unit,
         parse: (String, String) -> LiteRtLmAcousticEngine.LmResponse?,
+        contract: String = LiteRtLmAcousticEngine.RESPONSE_CONTRACT,
     ): LiteRtLmAcousticEngine.LmResponse? {
         return try {
             runBlocking {
@@ -26,7 +27,7 @@ object NanoBackend {
                     val request =
                         com.google.mlkit.genai.prompt.GenerateContentRequest.Builder(
                             com.google.mlkit.genai.prompt.TextPart(
-                                prompt + LiteRtLmAcousticEngine.RESPONSE_CONTRACT
+                                prompt + contract
                             )
                         ).apply {
                             temperature = 0.2f
