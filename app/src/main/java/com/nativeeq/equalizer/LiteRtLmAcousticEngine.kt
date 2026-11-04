@@ -102,12 +102,16 @@ class LiteRtLmAcousticEngine(private val context: Context) {
      * Free-form generation (visualizer flavors). [onComplete] gets the raw reply and its
      * backend tag, or (null, "RANDOM") when no LM is usable. Fires on the engine thread.
      */
-    fun generateRawAsync(prompt: String, onComplete: (String?, String) -> Unit) {
+    fun generateRawAsync(
+        prompt: String,
+        accept: (String) -> Boolean,
+        onComplete: (String?, String) -> Unit,
+    ) {
         try {
             executor.execute {
                 var raw: String? = null
                 var tag = "RANDOM"
-                val grab: (String, String) -> LmResponse? = { r, t -> if (r.isNotBlank()) { raw = r; tag = t }; null }
+                val grab: (String, String) -> LmResponse? = { r, t -> if (accept(r)) { raw = r; tag = t }; null }
                 runLiteRtLm(prompt, {}, "", grab)
                 if (raw == null) NanoBackend.run(prompt, {}, grab, "")
                 onComplete(raw, tag)

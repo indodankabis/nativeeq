@@ -137,7 +137,7 @@ class MainActivity : Activity() {
         ui.hypnoView.onFullscreenToggle = { toggleVizFullscreen() }
         ui.hypnoView.onAiRequest = {
             val prompt = ui.hypnoView.flavorPrompt(genreClassifier.currentArchetype.name)
-            lmEngine.generateRawAsync(prompt) { raw, tag ->
+            lmEngine.generateRawAsync(prompt, HypnoVisualizerView::isFlavorJson) { raw, tag ->
                 runOnUiThread {
                     val f = raw?.let { ui.hypnoView.parseFlavor(it) }
                     ui.hypnoView.finishAi(f, tag)

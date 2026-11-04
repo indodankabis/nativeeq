@@ -304,7 +304,15 @@ class HypnoVisualizerView @JvmOverloads constructor(
     private var beatIv = 500f
     private var lastSignalMs = 0L
 
+    private var lastExtBandsMs = 0L
+
+    /** DSP/mic triplet; takes priority over FFT-derived bands while it keeps arriving. */
     fun updateSpectralBands(low: Float, med: Float, high: Float) {
+        lastExtBandsMs = System.currentTimeMillis()
+        feedBands(low, med, high)
+    }
+
+    private fun feedBands(low: Float, med: Float, high: Float) {
         lowT = low.coerceIn(0f, 1f); midT = med.coerceIn(0f, 1f); highT = high.coerceIn(0f, 1f)
         val now = System.currentTimeMillis()
         if (lowT + midT + highT > 0.06f) lastSignalMs = now
@@ -349,7 +357,7 @@ class HypnoVisualizerView @JvmOverloads constructor(
                 else -> h = max(h, v)
             }
         }
-        if (l + m + h > 0.05f) updateSpectralBands(l, m, h)
+        if (l + m + h > 0.05f && System.currentTimeMillis() - lastExtBandsMs > 500) feedBands(l, m, h)
     }
 
     // ── buffers ──────────────────────────────────────────────────────────────
@@ -658,7 +666,13 @@ class HypnoVisualizerView @JvmOverloads constructor(
         if (!isPaused && isShown && windowVisibility == VISIBLE) postInvalidateOnAnimation()
     }
 
-    private companion object {
-        val SYMS = intArrayOf(1, 2, 3, 4, 5, 6, 8)
+    companion object {
+        private val SYMS = intArrayOf(1, 2, 3, 4, 5, 6, 8)
+
+        /** Thread-safe check that a model reply holds a flavor JSON object [parseFlavor] can use. */
+        fun isFlavorJson(raw: String): Boolean = runCatching {
+            val j = org.json.JSONObject(raw.substring(raw.indexOf('{'), raw.lastIndexOf('}') + 1))
+            listOf("zoom", "shape", "decay", "palette").any { j.has(it) }
+        }.getOrDefault(false)
     }
 }
