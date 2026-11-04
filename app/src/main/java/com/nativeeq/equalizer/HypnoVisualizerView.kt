@@ -308,7 +308,7 @@ class HypnoVisualizerView @JvmOverloads constructor(
 
     /** DSP/mic triplet; takes priority over FFT-derived bands while it keeps arriving. */
     fun updateSpectralBands(low: Float, med: Float, high: Float) {
-        lastExtBandsMs = System.currentTimeMillis()
+        if (low + med + high > 0.05f) lastExtBandsMs = System.currentTimeMillis()
         feedBands(low, med, high)
     }
 
