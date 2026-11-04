@@ -263,15 +263,6 @@ class EqUiHolders(context: Context) {
             it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
             showCurve(visualizerView.visibility != View.VISIBLE)
         }
-        hypnoView.setOnClickListener {
-            it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            hypnoView.nextFlavor()
-        }
-        hypnoView.setOnLongClickListener {
-            it.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-            hypnoView.newAiFlavor()
-            true
-        }
         vizPanel.addView(vizHeader)
         vizPanel.addView(visualizerView)
         vizPanel.addView(hypnoView)

@@ -12,6 +12,9 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.util.AttributeSet
+import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.View
 import kotlin.math.PI
 import kotlin.math.abs
@@ -45,6 +48,7 @@ class HypnoVisualizerView @JvmOverloads constructor(
         val shape: Shape, val sym: Int, val mirror: Boolean,
         val palette: IntArray, val amp: Float, val thick: Float,
         val kick: Float, val flash: Boolean,
+        val gen: Int = 0,
     )
 
     var isPaused = false
@@ -96,12 +100,12 @@ class HypnoVisualizerView @JvmOverloads constructor(
 
     fun nextFlavor() {
         flavorIdx = (flavorIdx + 1) % (presets.size + 1)
-        transitionTo(if (flavorIdx == AI) genome(rng.nextInt()) else presets[flavorIdx])
+        transitionTo(if (flavorIdx == AI) evolve() else presets[flavorIdx])
     }
 
     fun newAiFlavor() {
         flavorIdx = AI
-        transitionTo(genome(rng.nextInt()))
+        transitionTo(evolve())
     }
 
     private fun transitionTo(f: Flavor) {
@@ -111,11 +115,161 @@ class HypnoVisualizerView @JvmOverloads constructor(
     }
 
     /** Seeded random genome, biased toward combinations that stay readable. */
+    // ── taste evolution ─────────────────────────────────────────────────────
+    // Double-tap saves the current genome; AI mode then mostly breeds (crossover + mutation)
+    // from saved genomes instead of drawing at random.
+    private val prefs = context.getSharedPreferences("viz_taste", Context.MODE_PRIVATE)
+    private val liked: MutableList<Flavor> by lazy {
+        prefs.getString("liked", "").orEmpty().lines().mapNotNull { decode(it) }.toMutableList()
+    }
+    private var toast = ""
+    private var toastFade = 0f
+    private var writing = false
+
+    var onFullscreenToggle: (() -> Unit)? = null
+    /** Set to let long-press ask a language model for a flavor; must end with [finishAi]. */
+    var onAiRequest: (() -> Unit)? = null
+    var isFullscreen = false
+        set(v) { field = v; postInvalidateOnAnimation() }
+
+    fun toggleLike() {
+        val f = to
+        val i = liked.indexOfFirst { it.name == f.name }
+        if (i >= 0) liked.removeAt(i) else {
+            liked.add(f)
+            if (liked.size > 32) liked.removeAt(0)
+        }
+        prefs.edit().putString("liked", liked.joinToString("\n") { encode(it) }).apply()
+        flash(if (i >= 0) "UNSAVED" else "<3 SAVED · ${liked.size}")
+    }
+
+    private fun flash(msg: String) {
+        toast = msg; toastFade = 1.8f
+        postInvalidateOnAnimation()
+    }
+
+    fun finishAi(f: Flavor?, tag: String) {
+        writing = false
+        flavorIdx = AI
+        transitionTo(f ?: evolve())
+        flash(if (f != null) "[$tag]" else if (liked.isEmpty()) "NO MODEL · RANDOM" else "NO MODEL · BRED")
+    }
+
+    private fun evolve(): Flavor =
+        if (liked.isNotEmpty() && rng.nextFloat() < 0.75f) breed() else genome(rng.nextInt())
+
+    private fun breed(): Flavor {
+        val r = Random(rng.nextInt())
+        val a = liked[r.nextInt(liked.size)]
+        val b = liked[r.nextInt(liked.size)]
+        fun <T> pick(x: T, y: T) = if (r.nextBoolean()) x else y
+        fun g(x: Float, y: Float) = x + (y - x) * r.nextFloat()
+        val gen = max(a.gen, b.gen) + 1
+        val child = Flavor(
+            "${adjectives[r.nextInt(adjectives.size)]} ${nouns[r.nextInt(nouns.size)]} G$gen",
+            g(a.zoom, b.zoom), g(a.rot, b.rot), g(a.swirl, b.swirl),
+            g(a.warp, b.warp), g(a.warpFreq, b.warpFreq), g(a.warpSpeed, b.warpSpeed),
+            g(a.decay, b.decay), g(a.hue, b.hue), g(a.drift, b.drift),
+            if (r.nextFloat() < 0.1f) Shape.entries[r.nextInt(Shape.entries.size)] else pick(a.shape, b.shape),
+            if (r.nextFloat() < 0.1f) SYMS[r.nextInt(SYMS.size)] else pick(a.sym, b.sym),
+            pick(a.mirror, b.mirror),
+            IntArray(3) { if (r.nextFloat() < 0.12f) neon[r.nextInt(neon.size)] else pick(a.palette[it], b.palette[it]) },
+            g(a.amp, b.amp), g(a.thick, b.thick), g(a.kick, b.kick), pick(a.flash, b.flash), gen,
+        )
+        return mutate(child, r)
+    }
+
+    private fun mutate(f: Flavor, r: Random): Flavor {
+        fun m(v: Float, lo: Float, hi: Float) = (v + (r.nextFloat() - 0.5f) * (hi - lo) * 0.15f).coerceIn(lo, hi)
+        return f.copy(
+            zoom = m(f.zoom, 0.96f, 1.05f), rot = m(f.rot, -0.022f, 0.022f), swirl = m(f.swirl, -0.05f, 0.05f),
+            warp = m(f.warp, 0f, 2.6f), warpFreq = m(f.warpFreq, 2f, 9f), warpSpeed = m(f.warpSpeed, 0.3f, 2.2f),
+            decay = m(f.decay, 0.915f, 0.975f), hue = m(f.hue, -2f, 2f), drift = m(f.drift, 0f, 0.15f),
+            amp = m(f.amp, 0.22f, 0.42f), thick = m(f.thick, 1f, 2.2f), kick = m(f.kick, 0f, 0.06f),
+        )
+    }
+
+    private fun encode(f: Flavor): String = listOf(
+        f.name, f.gen, f.zoom, f.rot, f.swirl, f.warp, f.warpFreq, f.warpSpeed, f.decay, f.hue, f.drift,
+        f.shape.name, f.sym, f.mirror, f.palette.joinToString(","), f.amp, f.thick, f.kick, f.flash,
+    ).joinToString(";")
+
+    private fun decode(s: String): Flavor? = runCatching {
+        val p = s.split(";")
+        fun fl(i: Int) = p[i].toFloat()
+        Flavor(p[0], fl(2), fl(3), fl(4), fl(5), fl(6), fl(7), fl(8), fl(9), fl(10),
+            Shape.valueOf(p[11]), p[12].toInt(), p[13].toBoolean(),
+            p[14].split(",").map { it.toInt() }.toIntArray().takeIf { it.size == 3 }!!,
+            fl(15), fl(16), fl(17), p[18].toBoolean(), p[1].toInt())
+    }.getOrNull()
+
+    // ── model-written flavors ──────────────────────────────────────────────
+    fun flavorPrompt(style: String): String {
+        val bpm = if (System.currentTimeMillis() - lastBeatMs < 4000) "${(60000f / beatIv).toInt()} BPM" else "unknown"
+        return "You design presets for a MilkDrop-style music visualizer. The music playing now: " +
+            "style=$style, bass=${"%.2f".format(lowAvg)}, mids=${"%.2f".format(mid)}, " +
+            "treble=${"%.2f".format(high)} (0-1 scale), tempo=$bpm. Match its mood: calm or ambient -> slow " +
+            "zoom, high decay, soft lissajous; driving or bassy -> fast tunnel zoom, strong kick, bursts or stars. " +
+            "Respond with exactly one JSON object, no markdown, values within these ranges: " +
+            "{\"name\":\"TWO WORDS\",\"zoom\":0.96-1.05,\"rot\":-0.02-0.02,\"swirl\":-0.05-0.05," +
+            "\"warp\":0-2.6,\"decay\":0.915-0.975,\"hue\":-2-2,\"drift\":0-0.15," +
+            "\"shape\":\"RING|LINE|LISSAJOUS|SPIRAL|STAR|BURST\",\"sym\":1-8,\"mirror\":true," +
+            "\"palette\":[3 of \"cyan\",\"magenta\",\"purple\",\"lime\",\"amber\",\"blue\"]," +
+            "\"kick\":0-0.06,\"flash\":true}"
+    }
+
+    /** Parse a model's JSON reply into a clamped flavor; unspecified genes come from a bred/random base. */
+    fun parseFlavor(raw: String): Flavor? = runCatching {
+        val j = org.json.JSONObject(raw.substring(raw.indexOf('{'), raw.lastIndexOf('}') + 1))
+        val base = evolve()
+        fun f(k: String, v: Float) = j.optDouble(k, v.toDouble()).toFloat()
+        val names = mapOf("cyan" to cyan, "magenta" to magenta, "purple" to purple,
+            "lime" to lime, "amber" to amber, "blue" to neon[5])
+        val pal = base.palette.copyOf()
+        j.optJSONArray("palette")?.let { a ->
+            for (i in 0 until min(3, a.length())) names[a.optString(i).lowercase()]?.let { pal[i] = it }
+        }
+        val name = j.optString("name").uppercase().filter { it.isLetterOrDigit() || it == ' ' }
+            .trim().take(18).ifEmpty { base.name }
+        val sym = j.optInt("sym", base.sym).coerceIn(1, 8)
+        val shape = Shape.entries.find { it.name == j.optString("shape").uppercase() } ?: base.shape
+        Flavor(name, f("zoom", base.zoom).coerceIn(0.96f, 1.05f), f("rot", base.rot).coerceIn(-0.022f, 0.022f),
+            f("swirl", base.swirl).coerceIn(-0.05f, 0.05f), f("warp", base.warp).coerceIn(0f, 2.6f),
+            base.warpFreq, base.warpSpeed, f("decay", base.decay).coerceIn(0.915f, 0.975f),
+            f("hue", base.hue).coerceIn(-2f, 2f), f("drift", base.drift).coerceIn(0f, 0.15f),
+            shape, sym, j.optBoolean("mirror", base.mirror), pal, base.amp, base.thick,
+            f("kick", base.kick).coerceIn(0f, 0.06f), j.optBoolean("flash", base.flash))
+    }.getOrNull()
+
+    // ── gestures: tap next · double-tap save · hold AI · corner tap fullscreen ──
+    private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onDown(e: MotionEvent) = true
+        override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            if (e.x > width - 60f * d && e.y < 30f * d) onFullscreenToggle?.invoke() else nextFlavor()
+            return true
+        }
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            toggleLike()
+            return true
+        }
+        override fun onLongPress(e: MotionEvent) {
+            if (writing) return
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            val req = onAiRequest
+            if (req == null) newAiFlavor() else { writing = true; postInvalidateOnAnimation(); req() }
+        }
+    })
+
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(event: MotionEvent): Boolean = gestures.onTouchEvent(event)
+
     private fun genome(seed: Int): Flavor {
         val r = Random(seed)
         fun f(a: Float, b: Float) = a + r.nextFloat() * (b - a)
         val shape = Shape.entries[r.nextInt(Shape.entries.size)]
-        val sym = intArrayOf(1, 2, 3, 4, 5, 6, 8)[r.nextInt(7)]
+        val sym = SYMS[r.nextInt(SYMS.size)]
         val pal = neon.copyOf().also { it.shuffle(r) }.copyOf(3)
         val zoom = if (r.nextFloat() < 0.75f) f(1.005f, 1.05f) else f(0.96f, 0.995f)
         return Flavor(
@@ -138,7 +292,7 @@ class HypnoVisualizerView @JvmOverloads constructor(
             l(a.decay, b.decay), l(a.hue, b.hue), l(a.drift, b.drift),
             disc.shape, disc.sym, disc.mirror,
             IntArray(3) { lerpColor(a.palette[it], b.palette[it], t) },
-            l(a.amp, b.amp), l(a.thick, b.thick), l(a.kick, b.kick), disc.flash)
+            l(a.amp, b.amp), l(a.thick, b.thick), l(a.kick, b.kick), disc.flash, b.gen)
     }
 
     // ── audio ────────────────────────────────────────────────────────────────
@@ -147,6 +301,7 @@ class HypnoVisualizerView @JvmOverloads constructor(
     private var lowAvg = 0f
     private var beat = 0f
     private var lastBeatMs = 0L
+    private var beatIv = 500f
     private var lastSignalMs = 0L
 
     fun updateSpectralBands(low: Float, med: Float, high: Float) {
@@ -154,6 +309,8 @@ class HypnoVisualizerView @JvmOverloads constructor(
         val now = System.currentTimeMillis()
         if (lowT + midT + highT > 0.06f) lastSignalMs = now
         if (lowT > lowAvg * 1.35f + 0.04f && now - lastBeatMs > 220) {
+            val iv = now - lastBeatMs
+            if (iv < 2000) beatIv += (iv - beatIv) * 0.2f
             beat = 1f; lastBeatMs = now; beatPending = true
         }
         lowAvg += (lowT - lowAvg) * 0.08f
@@ -271,9 +428,10 @@ class HypnoVisualizerView @JvmOverloads constructor(
         if (morph < 1f) morph = min(1f, morph + dt / 2.5f)
         cur = blend(from, to, smooth(morph))
         if (nameFade > 0f) nameFade -= dt
+        if (toastFade > 0f) toastFade -= dt
         if (flavorIdx == AI) {
             aiTimer += dt
-            if (aiTimer > 14f && morph >= 1f) transitionTo(genome(rng.nextInt()))
+            if (aiTimer > 14f && morph >= 1f && !writing) transitionTo(evolve())
         }
     }
 
@@ -470,7 +628,10 @@ class HypnoVisualizerView @JvmOverloads constructor(
 
         label.textSize = 10f * d
         label.color = Color.argb(170, 255, 255, 255)
-        canvas.drawText("[${if (flavorIdx == AI) "AI" else "${flavorIdx + 1}/${presets.size}"}]", 6f * d, 13f * d, label)
+        val tagTxt = if (flavorIdx == AI) "AI" + (if (liked.isNotEmpty()) " · ${liked.size} SAVED" else "") else "${flavorIdx + 1}/${presets.size}"
+        canvas.drawText("[$tagTxt]", 6f * d, 13f * d, label)
+        val corner = if (isFullscreen) "[EXIT]" else "[FULL]"
+        canvas.drawText(corner, w - label.measureText(corner) - 6f * d, 13f * d, label)
         if (nameFade > 0f) {
             val a = (min(1f, nameFade) * 255).toInt()
             label.textSize = 16f * d
@@ -484,9 +645,20 @@ class HypnoVisualizerView @JvmOverloads constructor(
             label.isFakeBoldText = false
             label.textSize = 9f * d
             label.color = Color.argb(a * 2 / 3, 255, 255, 255)
-            val hint = "TAP ▸ NEXT   HOLD ▸ NEW AI"
+            val hint = "TAP ▸ NEXT  2×TAP ▸ SAVE  HOLD ▸ AI"
             canvas.drawText(hint, (w - label.measureText(hint)) / 2f, h / 2f + 16f * d, label)
         }
+        if (toastFade > 0f || writing) {
+            val a = if (writing) 255 else (min(1f, toastFade) * 255).toInt()
+            label.textSize = 11f * d
+            label.color = Color.argb(a, Color.red(magenta), Color.green(magenta), Color.blue(magenta))
+            val s = if (writing) "AI WRITING…" else toast
+            canvas.drawText(s, (w - label.measureText(s)) / 2f, h - 10f * d, label)
+        }
         if (!isPaused && isShown && windowVisibility == VISIBLE) postInvalidateOnAnimation()
+    }
+
+    private companion object {
+        val SYMS = intArrayOf(1, 2, 3, 4, 5, 6, 8)
     }
 }

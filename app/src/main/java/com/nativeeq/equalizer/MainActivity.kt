@@ -134,6 +134,17 @@ class MainActivity : Activity() {
         setContentView(ui.scrollContainer)
         dbHelper = TelemetryDbHelper(this)
         lmEngine = LiteRtLmAcousticEngine(this)
+        ui.hypnoView.onFullscreenToggle = { toggleVizFullscreen() }
+        ui.hypnoView.onAiRequest = {
+            val prompt = ui.hypnoView.flavorPrompt(genreClassifier.currentArchetype.name)
+            lmEngine.generateRawAsync(prompt) { raw, tag ->
+                runOnUiThread {
+                    val f = raw?.let { ui.hypnoView.parseFlavor(it) }
+                    ui.hypnoView.finishAi(f, tag)
+                    appendLog(if (f != null) "[VIZ] [$tag] wrote flavor ${f.name}" else "[VIZ] No LM flavor; evolved locally")
+                }
+            }
+        }
         logbook = TuningLogbook(this)
         npuAgent = NpuAudioAgent(this).apply {
             onTelemetryListener = { gains, msg, logLine, low, med, high -> onAgentTick(gains, msg, logLine, low, med, high) }
@@ -606,7 +617,45 @@ class MainActivity : Activity() {
         unregisterReceiver(receiver)
     }
 
+    private var vizFullscreen: android.app.Dialog? = null
+
+    /** Moves the visualizer into an immersive, screen-on dialog and back. */
+    private fun toggleVizFullscreen() {
+        vizFullscreen?.let { it.dismiss(); return }
+        val v = ui.hypnoView
+        val parent = v.parent as? android.view.ViewGroup ?: return
+        val idx = parent.indexOfChild(v)
+        val lp = v.layoutParams
+        parent.removeView(v)
+        val dlg = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        dlg.setContentView(v, android.view.ViewGroup.LayoutParams(-1, -1))
+        dlg.setOnDismissListener {
+            (v.parent as? android.view.ViewGroup)?.removeView(v)
+            parent.addView(v, idx, lp)
+            v.isFullscreen = false
+            vizFullscreen = null
+        }
+        v.isFullscreen = true
+        vizFullscreen = dlg
+        dlg.show()
+        dlg.window?.let { w ->
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (Build.VERSION.SDK_INT >= 30) {
+                w.insetsController?.let {
+                    it.hide(android.view.WindowInsets.Type.systemBars())
+                    it.systemBarsBehavior =
+                        android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                w.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                    android.view.View.SYSTEM_UI_FLAG_FULLSCREEN or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            }
+        }
+    }
+
     override fun onDestroy() {
+        vizFullscreen?.dismiss()
         super.onDestroy()
         if (isBound) {
             EqualizerService.onTelemetryListener = null

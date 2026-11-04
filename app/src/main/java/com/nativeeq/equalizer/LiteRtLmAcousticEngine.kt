@@ -98,6 +98,25 @@ class LiteRtLmAcousticEngine(private val context: Context) {
         }
     }
 
+    /**
+     * Free-form generation (visualizer flavors). [onComplete] gets the raw reply and its
+     * backend tag, or (null, "RANDOM") when no LM is usable. Fires on the engine thread.
+     */
+    fun generateRawAsync(prompt: String, onComplete: (String?, String) -> Unit) {
+        try {
+            executor.execute {
+                var raw: String? = null
+                var tag = "RANDOM"
+                val grab: (String, String) -> LmResponse? = { r, t -> if (r.isNotBlank()) { raw = r; tag = t }; null }
+                runLiteRtLm(prompt, {}, "", grab)
+                if (raw == null) NanoBackend.run(prompt, {}, grab, "")
+                onComplete(raw, tag)
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            onComplete(null, "RANDOM")
+        }
+    }
+
     fun release() {
         released.set(true)
         try {
@@ -120,7 +139,12 @@ class LiteRtLmAcousticEngine(private val context: Context) {
         return null
     }
 
-    private fun runLiteRtLm(prompt: String, onToken: (String) -> Unit): LmResponse? {
+    private fun runLiteRtLm(
+        prompt: String,
+        onToken: (String) -> Unit,
+        contract: String = RESPONSE_CONTRACT,
+        parse: (String, String) -> LmResponse? = ::parseLmOutput,
+    ): LmResponse? {
         val info = modelManager.anyModelPresent() ?: return null
         return try {
             onToken("[LITERT-LM] Loading ${info.displayName}…")
@@ -135,7 +159,7 @@ class LiteRtLmAcousticEngine(private val context: Context) {
                     engine.createConversation().use { convo ->
                         val sb = StringBuilder()
                         convo.sendMessageAsync(
-                            prompt + RESPONSE_CONTRACT,
+                            prompt + contract,
                             object : com.google.ai.edge.litertlm.MessageCallback {
                                 override fun onMessage(
                                     message: com.google.ai.edge.litertlm.Message,
@@ -154,7 +178,7 @@ class LiteRtLmAcousticEngine(private val context: Context) {
                                 }
                             },
                         )
-                        parseLmOutput(sb.toString(), "LITERT-LM")
+                        parse(sb.toString(), "LITERT-LM")
                     }
                 }
             }
