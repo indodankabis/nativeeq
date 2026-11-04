@@ -5,12 +5,17 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.AudioPlaybackConfiguration
 import android.os.Build
+import android.media.audiofx.AudioEffect
 import android.media.audiofx.BassBoost
 import android.media.audiofx.DynamicsProcessing
 import android.media.audiofx.Virtualizer
@@ -20,8 +25,10 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.SystemClock
+import android.os.Trace
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.log10
@@ -70,6 +77,47 @@ class EqualizerService : Service() {
 
         const val GAIN_GRID_MB = 50f
         const val LIMITER_GRID_DB = 0.1f
+
+        /** Headphone-correction stage: DP postEq, log-spaced 20Hz-20kHz (matches tools/build_autoeq.py). */
+        const val POST_EQ_BANDS = 32
+        private const val POST_EQ_MIN_HZ = 20f
+        private const val POST_EQ_MAX_HZ = 20000f
+        const val POST_EQ_GRID_DB = 0.25f
+        const val ROUTE_INTERNAL = "dev_internal"
+        private const val HEADPHONE_OFF = "__off__"
+
+        fun postEqEdgeHz(edge: Int): Float =
+            POST_EQ_MIN_HZ * (POST_EQ_MAX_HZ / POST_EQ_MIN_HZ).pow(edge.toFloat() / POST_EQ_BANDS)
+
+        /** Output route key: "bt:<name>", "usb:<name>", "wired" or [ROUTE_INTERNAL]. */
+        @Volatile var currentRouteKey = ROUTE_INTERNAL
+            private set
+        /** Active headphone correction, e.g. "Sony WH-1000XM4 (auto)", or null. */
+        @Volatile var headphoneLabel: String? = null
+            private set
+
+        private var instanceRef = WeakReference<EqualizerService>(null)
+        private val controlSessions = HashSet<Int>()
+
+        /** From [SessionControlReceiver] or the service's runtime receiver. */
+        fun onControlSession(session: Int, open: Boolean) {
+            val changed = synchronized(controlSessions) {
+                val c = if (open) controlSessions.add(session) else controlSessions.remove(session)
+                PerfStats.controlSessions = controlSessions.size
+                c
+            }
+            if (!changed) return
+            PerfStats.controlEvents.incrementAndGet()
+            instanceRef.get()?.requestReconcile(SystemClock.elapsedRealtimeNanos())
+        }
+
+        private fun controlSessionSnapshot(): Set<Int> =
+            synchronized(controlSessions) { HashSet(controlSessions) }
+
+        // AudioDeviceInfo types newer than minSdk 26 (28, 31, 31).
+        private const val TYPE_HEARING_AID = 23
+        private const val TYPE_BLE_HEADSET = 26
+        private const val TYPE_BLE_SPEAKER = 27
 
         // AudioPlaybackConfiguration.PLAYER_STATE_* (@SystemApi constants)
         private const val PLAYER_STATE_RELEASED = 0
@@ -159,6 +207,16 @@ class EqualizerService : Service() {
     private val morphHandler = Handler(dspThread.looper)
     private var isForegroundStarted = false
     private var playbackCallbackRegistered = false
+    private var deviceCallbackRegistered = false
+    private var controlReceiverRegistered = false
+    // Last session set seen via the playback callback / DUMP fallback.
+    @Volatile private var playbackLive: Set<Int> = emptySet()
+    private var postEqInUse = false
+    val currentPostEqDb = FloatArray(POST_EQ_BANDS)
+    private val targetPostEqDb = FloatArray(POST_EQ_BANDS)
+    private var lastRouteProductName: String? = null
+    val autoEq: AutoEqCatalog? by lazy { AutoEqCatalog.load(assets) }
+    private val headphonePrefs by lazy { getSharedPreferences("headphone_correction", Context.MODE_PRIVATE) }
 
     private val dbHelper by lazy { TelemetryDbHelper(this) }
     private val binder = LocalBinder()
@@ -174,6 +232,8 @@ class EqualizerService : Service() {
     private val morphRunnable = object : Runnable {
         override fun run() {
             val frameStart = SystemClock.uptimeMillis()
+            Trace.beginSection("eq.morph")
+            PerfStats.morphFrames.incrementAndGet()
             var activeDelta = false
             for (i in 0 until bandCount) {
                 val diff = targetGainsMb[i] - currentGainsMb[i]
@@ -184,6 +244,17 @@ class EqualizerService : Service() {
                     currentGainsMb[i] = targetGainsMb[i]
                 }
             }
+            if (postEqInUse) {
+                for (b in 0 until POST_EQ_BANDS) {
+                    val diff = targetPostEqDb[b] - currentPostEqDb[b]
+                    if (abs(diff) > POST_EQ_GRID_DB) {
+                        currentPostEqDb[b] += morphAlpha * diff
+                        activeDelta = true
+                    } else {
+                        currentPostEqDb[b] = targetPostEqDb[b]
+                    }
+                }
+            }
             val limiterDiff = targetLimiterPreGainDb - currentLimiterPreGainDb
             if (abs(limiterDiff) > LIMITER_GRID_DB) {
                 currentLimiterPreGainDb += morphAlpha * limiterDiff
@@ -192,6 +263,7 @@ class EqualizerService : Service() {
                 currentLimiterPreGainDb = targetLimiterPreGainDb
             }
             val wrote = applyHardwareState()
+            Trace.endSection()
             if (wrote || activeDelta) {
                 // Self-clocking: hold a 16ms cadence, but if the JNI writes
                 // themselves overran the frame, yield at least that long.
@@ -214,7 +286,17 @@ class EqualizerService : Service() {
         }
     }
 
-    private val dumpsysReconcile = Runnable { reconcileSessions(readDumpsysSessions()) }
+    private val dumpsysReconcile = Runnable {
+        playbackLive = readDumpsysSessions()
+        reconcileSessions(SystemClock.elapsedRealtimeNanos())
+    }
+
+    private val controlReceiver = SessionControlReceiver()
+
+    private val deviceCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) = refreshRoute()
+        override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>?) = refreshRoute()
+    }
 
     init {
         initDspEffects()
@@ -223,19 +305,30 @@ class EqualizerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instanceRef = WeakReference(this)
         registerSessionTracking()
+    }
+
+    fun requestReconcile(eventNanos: Long) {
+        morphHandler.post { reconcileSessions(eventNanos) }
     }
 
     private fun hasPendingMorph(): Boolean {
         for (i in 0 until bandCount) {
             if (targetGainsMb[i] != currentGainsMb[i]) return true
         }
+        if (postEqInUse) {
+            for (b in 0 until POST_EQ_BANDS) if (targetPostEqDb[b] != currentPostEqDb[b]) return true
+        }
         return targetLimiterPreGainDb != currentLimiterPreGainDb
     }
 
     /** Writes only the params whose quantized value changed. Returns true if any JNI write happened. */
     private fun applyGainsToDp(dp: DynamicsProcessing): Boolean {
-        val cache = lastWritten.getOrPut(dp) { ShortArray(bandCount + 1) { Short.MIN_VALUE } }
+        // postEq slots start at the config's 0dB so a fresh DP with correction off costs no writes.
+        val cache = lastWritten.getOrPut(dp) {
+            ShortArray(bandCount + 1 + POST_EQ_BANDS) { if (it > bandCount) 0 else Short.MIN_VALUE }
+        }
         var wrote = false
         for (i in 0 until bandCount) {
             val mb = currentGainsMb[i].roundToInt().coerceIn(-9999, 9999).toShort()
@@ -244,6 +337,7 @@ class EqualizerService : Service() {
                 val band = dp.getPreEqBandByChannelIndex(ch, i)
                 band.gain = mb / 100f
                 dp.setPreEqBandByChannelIndex(ch, i, band)
+                PerfStats.jniWrites.incrementAndGet()
             }
             cache[i] = mb
             wrote = true
@@ -259,9 +353,25 @@ class EqualizerService : Service() {
                 limiter.threshold = -1f
                 limiter.postGain = postGainCdb / 100f
                 dp.setLimiterByChannelIndex(ch, limiter)
+                PerfStats.jniWrites.incrementAndGet()
             }
             cache[bandCount] = postGainCdb
             wrote = true
+        }
+        if (postEqInUse) {
+            for (b in 0 until POST_EQ_BANDS) {
+                val slot = bandCount + 1 + b
+                val cdb = (currentPostEqDb[b] * 100f).roundToInt().coerceIn(-9999, 9999).toShort()
+                if (cdb == cache[slot]) continue
+                for (ch in 0..1) {
+                    val band = dp.getPostEqBandByChannelIndex(ch, b)
+                    band.gain = cdb / 100f
+                    dp.setPostEqBandByChannelIndex(ch, b, band)
+                    PerfStats.jniWrites.incrementAndGet()
+                }
+                cache[slot] = cdb
+                wrote = true
+            }
         }
         return wrote
     }
@@ -269,14 +379,16 @@ class EqualizerService : Service() {
     private fun initDspEffects() {
         if (dynamicsProcessing != null) return
         try {
-            val config = DynamicsProcessing.Config.Builder(
-                0, 2, true, bandCount, true, bandCount, false, 0, true
-            ).build()
-            for (b in 0 until bandCount) {
-                config.setPreEqBandAllChannelsTo(b, DynamicsProcessing.EqBand(true, bandFreqs[b], 0f))
+            // Prefer the chain with the headphone-correction postEq stage; fall
+            // back to the original preEq-only layout if the device rejects it.
+            var config = buildDspConfig(withPostEq = true)
+            val dp = try {
+                DynamicsProcessing(0, 0, config).also { postEqInUse = true }
+            } catch (_: Exception) {
+                config = buildDspConfig(withPostEq = false)
+                DynamicsProcessing(0, 0, config)
             }
             dspConfig = config
-            val dp = DynamicsProcessing(0, 0, config)
             dp.enabled = true
             dynamicsProcessing = dp
             sessionDps = HashMap()
@@ -292,13 +404,53 @@ class EqualizerService : Service() {
         }
     }
 
+    private fun buildDspConfig(withPostEq: Boolean): DynamicsProcessing.Config {
+        val config = DynamicsProcessing.Config.Builder(
+            0, 2, true, bandCount, true, bandCount,
+            withPostEq, if (withPostEq) POST_EQ_BANDS else 0, true
+        ).build()
+        for (b in 0 until bandCount) {
+            config.setPreEqBandAllChannelsTo(b, DynamicsProcessing.EqBand(true, bandFreqs[b], 0f))
+        }
+        if (withPostEq) {
+            for (b in 0 until POST_EQ_BANDS) {
+                config.setPostEqBandAllChannelsTo(
+                    b, DynamicsProcessing.EqBand(true, postEqEdgeHz(b + 1), 0f)
+                )
+            }
+        }
+        return config
+    }
+
     /**
      * Per-session attach, event-driven: AudioPlaybackCallback fires on every
      * player start/pause/stop and we reconcile the session -> DP map.
      */
     private fun registerSessionTracking() {
-        if (playbackCallbackRegistered) return
         val am = getSystemService(AudioManager::class.java) ?: return
+        if (!controlReceiverRegistered) {
+            val filter = IntentFilter().apply {
+                addAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)
+                addAction(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION)
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    registerReceiver(controlReceiver, filter, null, morphHandler, Context.RECEIVER_EXPORTED)
+                } else {
+                    registerReceiver(controlReceiver, filter, null, morphHandler)
+                }
+                controlReceiverRegistered = true
+            } catch (_: Exception) {
+            }
+        }
+        if (!deviceCallbackRegistered) {
+            try {
+                am.registerAudioDeviceCallback(deviceCallback, morphHandler)
+                deviceCallbackRegistered = true
+            } catch (_: Exception) {
+            }
+        }
+        if (playbackCallbackRegistered) return
         try {
             am.registerAudioPlaybackCallback(playbackCallback, morphHandler)
             playbackCallbackRegistered = true
@@ -309,6 +461,8 @@ class EqualizerService : Service() {
     }
 
     private fun onPlaybackConfigs(configs: List<AudioPlaybackConfiguration>) {
+        val eventNanos = SystemClock.elapsedRealtimeNanos()
+        PerfStats.playbackEvents.incrementAndGet()
         val live = HashSet<Int>()
         var anonymized = 0
         for (cfg in configs) {
@@ -329,7 +483,8 @@ class EqualizerService : Service() {
             morphHandler.post(dumpsysReconcile)
             return
         }
-        reconcileSessions(live)
+        playbackLive = live
+        reconcileSessions(eventNanos)
     }
 
     private fun hasDumpPermission(): Boolean =
@@ -359,10 +514,15 @@ class EqualizerService : Service() {
         return live
     }
 
+    /** Live sessions = playback callback/DUMP view ∪ sessions announced via EQ control broadcasts. */
     @Synchronized
-    private fun reconcileSessions(live: Set<Int>) {
+    private fun reconcileSessions(eventNanos: Long) {
         val map = sessionDps ?: return
         val config = dspConfig ?: return
+        Trace.beginSection("eq.reconcile")
+        val live = HashSet(playbackLive)
+        live.addAll(controlSessionSnapshot())
+        var attached = false
         for (session in live) {
             if (map.containsKey(session)) continue
             try {
@@ -370,8 +530,12 @@ class EqualizerService : Service() {
                 dp.enabled = true
                 map[session] = dp
                 applyGainsToDp(dp)
+                attached = true
             } catch (_: Exception) {
             }
+        }
+        if (attached) {
+            PerfStats.lastAttachMicros = (SystemClock.elapsedRealtimeNanos() - eventNanos) / 1000
         }
         val it = map.entries.iterator()
         while (it.hasNext()) {
@@ -385,6 +549,8 @@ class EqualizerService : Service() {
                 it.remove()
             }
         }
+        PerfStats.sessionDps = map.size
+        Trace.endSection()
     }
 
     @Synchronized
@@ -411,6 +577,7 @@ class EqualizerService : Service() {
     fun setCaptureDemand(uiVisible: Boolean, agentActive: Boolean) {
         synchronized(captureLock) {
             captureWanted = uiVisible || agentActive
+            PerfStats.captureOn = captureWanted
             val v = visualizer ?: return
             try {
                 if (v.enabled != captureWanted) v.enabled = captureWanted
@@ -449,6 +616,18 @@ class EqualizerService : Service() {
     }
 
     private fun onFftFrame(fft: ByteArray, samplingRateMilliHz: Int) {
+        val t0 = System.nanoTime()
+        Trace.beginSection("eq.fft")
+        try {
+            processFftFrame(fft, samplingRateMilliHz)
+        } finally {
+            Trace.endSection()
+            PerfStats.fftNanos.addAndGet(System.nanoTime() - t0)
+            PerfStats.fftFrames.incrementAndGet()
+        }
+    }
+
+    private fun processFftFrame(fft: ByteArray, samplingRateMilliHz: Int) {
         var lowSum = 0f
         var medSum = 0f
         var highSum = 0f
@@ -472,6 +651,7 @@ class EqualizerService : Service() {
         val now = SystemClock.uptimeMillis()
         if (now - lastSpectrumMs < SPECTRUM_INTERVAL_MS) return
         lastSpectrumMs = now
+        PerfStats.spectrumOut.incrementAndGet()
         spectrumSink(computeLogSpectrum(fft, samplingRateMilliHz))
     }
 
@@ -614,6 +794,81 @@ class EqualizerService : Service() {
         setTargetGains(FloatArray(targets.size) { targets[it].toFloat() }, immediate)
     }
 
+    /** Morph the postEq stage to [gainsDb] (AutoEq bands), or back to flat when null. */
+    fun setHeadphoneCorrection(gainsDb: FloatArray?) {
+        if (!postEqInUse) return
+        for (b in 0 until POST_EQ_BANDS) {
+            val g = gainsDb?.getOrNull(b) ?: 0f
+            targetPostEqDb[b] = (g / POST_EQ_GRID_DB).roundToInt() * POST_EQ_GRID_DB
+        }
+        if (isMorphing.compareAndSet(false, true)) morphHandler.post(morphRunnable)
+    }
+
+    val headphoneCorrectionAvailable: Boolean get() = postEqInUse && autoEq != null
+
+    /** Pin a catalog model (or null = off) for the current route; persists per route. */
+    fun setHeadphoneModel(name: String?) {
+        headphonePrefs.edit().putString("model:$currentRouteKey", name ?: HEADPHONE_OFF).apply()
+        morphHandler.post { applyHeadphoneForRoute() }
+    }
+
+    /** Forget the pinned model for the current route and go back to auto-matching. */
+    fun clearHeadphoneOverride() {
+        headphonePrefs.edit().remove("model:$currentRouteKey").apply()
+        morphHandler.post { applyHeadphoneForRoute() }
+    }
+
+    private fun applyHeadphoneForRoute() {
+        val catalog = autoEq
+        val override = headphonePrefs.getString("model:$currentRouteKey", null)
+        val product = lastRouteProductName
+        var label: String? = null
+        val entry = when {
+            catalog == null || override == HEADPHONE_OFF -> null
+            override != null -> catalog.find(override)?.also { label = "${it.name} (manual)" }
+            product != null && !currentRouteKey.startsWith("wired") && currentRouteKey != ROUTE_INTERNAL ->
+                catalog.bestMatch(product)?.entry?.also { label = "${it.name} (auto)" }
+            else -> null
+        }
+        headphoneLabel = label
+        setHeadphoneCorrection(entry?.gainsDb)
+    }
+
+    private fun refreshRoute() {
+        val am = getSystemService(AudioManager::class.java) ?: return
+        val outs = try {
+            am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        } catch (_: Exception) {
+            return
+        }
+        val best = outs.maxByOrNull { routePriority(it.type) }
+        val prio = best?.let { routePriority(it.type) } ?: 0
+        val name = best?.productName?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        val key = when (prio) {
+            3 -> "bt:${name ?: "unknown"}"
+            2 -> "usb:${name ?: "unknown"}"
+            1 -> "wired"
+            else -> ROUTE_INTERNAL
+        }
+        if (key == currentRouteKey && name == lastRouteProductName) return
+        currentRouteKey = key
+        lastRouteProductName = if (prio >= 2) name else null
+        applyHeadphoneForRoute()
+        sendBroadcast(
+            Intent(ACTION_STATE_CHANGED).setPackage(packageName)
+                .putExtra(EXTRA_STATE, currentState)
+                .putExtra(EXTRA_ROUTE_KEY, key)
+        )
+    }
+
+    private fun routePriority(type: Int): Int = when (type) {
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+        TYPE_HEARING_AID, TYPE_BLE_HEADSET, TYPE_BLE_SPEAKER -> 3
+        AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> 2
+        AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> 1
+        else -> 0
+    }
+
     fun saveCustomRouteCurve(routeKey: String, gains: ShortArray) {
         dbHelper.saveRouteProfile(
             routeKey, FloatArray(gains.size) { gains[it].toFloat() },
@@ -654,6 +909,16 @@ class EqualizerService : Service() {
                     ?.unregisterAudioPlaybackCallback(playbackCallback)
                 playbackCallbackRegistered = false
             }
+            if (deviceCallbackRegistered) {
+                getSystemService(AudioManager::class.java)
+                    ?.unregisterAudioDeviceCallback(deviceCallback)
+                deviceCallbackRegistered = false
+            }
+            if (controlReceiverRegistered) {
+                unregisterReceiver(controlReceiver)
+                controlReceiverRegistered = false
+            }
+            if (instanceRef.get() === this) instanceRef = WeakReference(null)
             morphHandler.removeCallbacks(morphRunnable)
             morphHandler.removeCallbacks(dumpsysReconcile)
             dspThread.quitSafely()
