@@ -24,16 +24,14 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
- * Unified neon visualizer: a background layer (BARS / GRID / SCOPE / MIN) under the
- * draggable 5-band EQ curve, RAW + MIC RTA traces, peak hold and limiter GR meter.
+ * Neon EQ graph: live spectrum bars with peak hold under the draggable 5-band EQ curve,
+ * MIC RTA trace and limiter GR meter.
  * Drag a node to set gain (±10 dB, snaps at 0); hold the top legend strip for A/B bypass.
  * Inputs arrive at ~10-30 Hz and are smoothed per frame, so motion stays fluid at 60 fps.
  */
 class RetroVisualizerView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null,
 ) : View(context, attrs) {
-
-    enum class Mode { BARS, GRID, SCOPE, MIN }
 
     var onGainDraggedListener: ((Int, Short) -> Unit)? = null
     var onBypassToggleListener: ((Boolean) -> Unit)? = null
@@ -44,15 +42,6 @@ class RetroVisualizerView @JvmOverloads constructor(
             lastFrameNs = 0L
             if (!v) postInvalidateOnAnimation()
         }
-
-    var mode = Mode.BARS
-        private set
-
-    fun cycleMode(): Mode {
-        mode = Mode.entries[(mode.ordinal + 1) % Mode.entries.size]
-        postInvalidateOnAnimation()
-        return mode
-    }
 
     private val d = resources.displayMetrics.density
     private fun dp(v: Float) = v * d
@@ -317,14 +306,8 @@ class RetroVisualizerView @JvmOverloads constructor(
 
         canvas.save()
         canvas.clipRect(chartL, chartT, chartR, chartB)
-        when (mode) {
-            Mode.BARS -> drawBars(canvas)
-            Mode.GRID -> drawGrid(canvas)
-            Mode.SCOPE -> drawScope(canvas)
-            Mode.MIN -> Unit
-        }
+        drawBars(canvas)
         drawDbGrid(canvas)
-        if (mode != Mode.BARS) drawTrace(canvas, raw, alpha(purple, 170), dp(1.5f))
         if (mic.any { it > 0.02f }) drawTrace(canvas, mic, magenta, dp(1.5f))
         drawCurve(canvas)
         canvas.restore()
@@ -334,7 +317,7 @@ class RetroVisualizerView @JvmOverloads constructor(
         drawGr(canvas)
         drawLegend(canvas, w)
         if (activeBand in 0 until 5) drawCallout(canvas, w)
-        if (mode != Mode.MIN && System.currentTimeMillis() - lastSignalMs > 1500) {
+        if (System.currentTimeMillis() - lastSignalMs > 1500) {
             textBold.color = alpha(dim, 200)
             val s = "· NO SIGNAL ·"
             canvas.drawText(s, (chartL + chartR - textBold.measureText(s)) * 0.5f, chartT + dp(14f), textBold)
@@ -362,63 +345,6 @@ class RetroVisualizerView @JvmOverloads constructor(
         flat.color = bg
         var y = chartB - dp(4f)
         while (y > chartT) { canvas.drawRect(chartL, y, chartR, y + dp(1.2f), flat); y -= dp(4f) }
-    }
-
-    private fun drawGrid(canvas: Canvas) {
-        val cx = (chartL + chartR) * 0.5f
-        val horizon = chartT + (chartB - chartT) * 0.52f
-        val r = (chartB - chartT) * (0.26f + raw[0] * 0.12f + beat * 0.06f)
-        val sunCy = horizon - r * 0.15f
-        val step = dp(2.5f)
-        var y = sunCy - r
-        var row = 0
-        while (y < horizon) {
-            val t = ((y - (sunCy - r)) / (horizon - sunCy + r)).coerceIn(0f, 1f)
-            val gapEvery = if (t > 0.55f) 3 else 99
-            if (row % gapEvery != gapEvery - 1) {
-                val dy = y - sunCy
-                val half = kotlin.math.sqrt(max(r * r - dy * dy, 0f))
-                line.strokeWidth = step
-                line.color = alpha(lerp(magenta, amber, t), 190)
-                line.strokeCap = Paint.Cap.BUTT
-                canvas.drawLine(cx - half, y, cx + half, y, line)
-            }
-            y += step; row++
-        }
-        line.strokeCap = Paint.Cap.ROUND
-        line.strokeWidth = dp(1f)
-        line.color = alpha(magenta, 150)
-        for (i in -12..12) canvas.drawLine(cx + i * dp(6f), horizon, cx + i * (chartR - chartL) * 0.12f, chartB, line)
-        val scroll = (phase * 0.6f) % 1f
-        for (rI in 0 until 7) {
-            val n = (rI + scroll) / 7f
-            val gy = horizon + (chartB - horizon) * n * n * n
-            line.color = alpha(magenta, (60 + 160 * n).toInt().coerceIn(0, 255))
-            canvas.drawLine(chartL, gy, chartR, gy, line)
-        }
-        line.color = alpha(cyan, 200)
-        canvas.drawLine(chartL, horizon, chartR, horizon, line)
-    }
-
-    private fun drawScope(canvas: Canvas) {
-        val mid = (chartT + chartB) * 0.5f
-        val amp = (chartB - chartT) * 0.42f
-        val freqs = floatArrayOf(1.5f, 3.2f, 6.5f, 13f, 26f)
-        tracePath.reset()
-        val n = 120
-        for (s in 0..n) {
-            val u = s / n.toFloat()
-            var v = 0f
-            for (b in 0 until 5) v += sin(u * freqs[b] * 6.283f + phase * (2f + b)) * raw[b] * (1f / (1f + b * 0.35f))
-            val env = sin(u * Math.PI.toFloat())
-            val x = chartL + u * (chartR - chartL)
-            val y = mid - (v * 0.55f).coerceIn(-1f, 1f) * amp * env
-            if (s == 0) tracePath.moveTo(x, y) else tracePath.lineTo(x, y)
-        }
-        line.color = alpha(lime, 60); line.strokeWidth = dp(5f)
-        canvas.drawPath(tracePath, line)
-        line.color = lime; line.strokeWidth = dp(1.5f)
-        canvas.drawPath(tracePath, line)
     }
 
     private fun drawDbGrid(canvas: Canvas) {
@@ -520,7 +446,7 @@ class RetroVisualizerView @JvmOverloads constructor(
     private fun drawLegend(canvas: Canvas, w: Float) {
         val base = dp(13f)
         textBold.color = cyan
-        val m = "[${mode.name}]"
+        val m = "[EQ]"
         canvas.drawText(m, chartL, base, textBold)
         var x = chartL + textBold.measureText(m) + dp(8f)
         if (isBypassed) {
@@ -537,7 +463,6 @@ class RetroVisualizerView @JvmOverloads constructor(
             x += text.measureText(label) + dp(8f)
         }
         key("EQ", cyan)
-        if (mode != Mode.BARS) key("RAW", purple)
         key("MIC", magenta)
         text.color = alpha(dim, 230)
         val hint = "HOLD ▔ A/B"

@@ -169,6 +169,9 @@ class EqUiHolders(context: Context) {
     val visualizerView = RetroVisualizerView(context).apply {
         layoutParams = LinearLayout.LayoutParams(-1, dp(190f))
     }
+    val hypnoView = HypnoVisualizerView(context).apply {
+        layoutParams = LinearLayout.LayoutParams(-1, dp(190f))
+    }
     val bitButtons = ArrayList<Button>()
     val bassLabel = mono(12f, CYAN)
     val bassBar = SeekBar(context).apply { max = 1000 }.neonTint()
@@ -242,21 +245,37 @@ class EqUiHolders(context: Context) {
         root.addView(statusLabel)
         root.addView(npuStatusLabel)
 
-        // Visualizer: tap the header to cycle the background layer; the EQ curve
-        // stays draggable in every mode.
+        // One view at a time; tap the header to swap. The EQ curve consumes touches
+        // (node drag / bypass); on the visualizer tap = next flavor, hold = new AI flavor.
         val vizPanel = panel(CYAN)
-        val vizHeader = header("VIZ", CYAN).apply {
+        val vizHeader = header("EQ CURVE", CYAN).apply {
             minHeight = dp(32f)
             gravity = Gravity.CENTER_VERTICAL
             isClickable = true
-            text = "[ VIZ · ${visualizerView.mode.name} ]  ⇄ TAP"
         }
+        fun showCurve(curve: Boolean) {
+            visualizerView.visibility = if (curve) View.VISIBLE else View.GONE
+            hypnoView.visibility = if (curve) View.GONE else View.VISIBLE
+            vizHeader.text = if (curve) "[ EQ CURVE ]  ⇄ TAP" else "[ VISUALIZER · ${hypnoView.flavorName} ]  ⇄"
+        }
+        hypnoView.onFlavorChanged = { if (hypnoView.visibility == View.VISIBLE) showCurve(false) }
         vizHeader.setOnClickListener {
             it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            vizHeader.text = "[ VIZ · ${visualizerView.cycleMode().name} ]  ⇄ TAP"
+            showCurve(visualizerView.visibility != View.VISIBLE)
+        }
+        hypnoView.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            hypnoView.nextFlavor()
+        }
+        hypnoView.setOnLongClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            hypnoView.newAiFlavor()
+            true
         }
         vizPanel.addView(vizHeader)
         vizPanel.addView(visualizerView)
+        vizPanel.addView(hypnoView)
+        showCurve(true)
         root.addView(vizPanel)
 
         // DSP: 4-bit preset register + bass/3D bars in one section.

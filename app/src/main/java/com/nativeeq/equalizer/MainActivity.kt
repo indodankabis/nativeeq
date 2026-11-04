@@ -87,6 +87,7 @@ class MainActivity : Activity() {
                 if (now - lastTelemetryUiMs >= 100) {
                     lastTelemetryUiMs = now
                     runOnUiThread {
+                        ui.hypnoView.updateSpectralBands(low, med, high)
                         ui.visualizerView.updateSpectralTriplet(low, med, high)
                     }
                 }
@@ -418,6 +419,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     ui.visualizerView.updateMicBands(bands)
                     if (micLow + micMed + micHigh > 0.03f) {
+                        ui.hypnoView.updateSpectralBands(micLow, micMed, micHigh)
                         ui.visualizerView.updateSpectralTriplet(micLow, micMed, micHigh)
                     }
                 }
@@ -565,6 +567,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         ui.visualizerView.isPaused = false
+        ui.hypnoView.isPaused = false
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == 0) {
             micAnalyzer.start()
         }
@@ -579,6 +582,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         ui.visualizerView.isPaused = true
+        ui.hypnoView.isPaused = true
         micAnalyzer.stop()
         unregisterReceiver(receiver)
     }
