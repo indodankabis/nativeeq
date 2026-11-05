@@ -533,10 +533,17 @@ class MainActivity : Activity() {
     /** Route switched (headphones in/out): bring up that route's saved curve, if any. */
     private fun onRouteChanged() {
         appendLog("[ROUTE] -> $currentRoute")
-        eqService?.loadCustomRouteCurve(currentRoute)?.let { saved ->
+        val svc = eqService
+        val saved = svc?.loadCustomRouteCurve(currentRoute)
+        if (saved != null) {
             hasCustomCurve = true
             ui.visualizerView.setTargetGains(saved)
             appendLog("[SQLITE] Loaded saved curve for $currentRoute")
+        } else if (svc != null) {
+            // No profile for this route: the current curve keeps playing, so show
+            // it (renderState above may have drawn the preset instead of it).
+            val g = svc.targetGainsMb
+            ui.visualizerView.setTargetGains(ShortArray(g.size) { g[it].toInt().toShort() })
         }
         refreshHeadphoneLabel()
     }
