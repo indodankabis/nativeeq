@@ -381,8 +381,9 @@ class EqualizerService : Service() {
         try {
             // Prefer the chain with the headphone-correction postEq stage; fall
             // back to the original preEq-only layout if the device rejects it.
-            var config = buildDspConfig(withPostEq = true)
+            var config: DynamicsProcessing.Config
             val dp = try {
+                config = buildDspConfig(withPostEq = true)
                 DynamicsProcessing(0, 0, config).also { postEqInUse = true }
             } catch (_: Exception) {
                 config = buildDspConfig(withPostEq = false)
