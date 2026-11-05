@@ -578,7 +578,7 @@ class MainActivity : Activity() {
     /** Surprise tier: ridge regression fit on this user's kept/reverted tuning events. */
     private fun runTasteModel() {
         val spectrum = npuAgent?.latestSpectrum()
-        if (spectrum == null) {
+        if (spectrum == null || TasteModel.isSilent(spectrum)) {
             ui.advisorResultLabel.text = "MY TASTE: play some music first (needs live spectrum)."
             return
         }

@@ -32,6 +32,12 @@ class TasteModel private constructor(
         private const val MAX_MB = 900f
         private val IN = EqualizerService.SPECTRUM_BANDS
 
+        /** Capture runs while the UI is visible even with nothing playing; such frames carry no context. */
+        fun isSilent(spectrum: FloatArray?): Boolean =
+            spectrum == null || (spectrum.maxOrNull() ?: 0f) < SILENCE_LEVEL
+
+        private const val SILENCE_LEVEL = 0.05f
+
         private fun features(spectrum: FloatArray): FloatArray =
             FloatArray(IN + 1) { if (it < IN) spectrum[it] else 1f }
 
@@ -39,7 +45,7 @@ class TasteModel private constructor(
 
         fun samplesFrom(tuples: List<TelemetryDbHelper.TrainingTuple>): List<Sample> =
             tuples.mapNotNull { t ->
-                if (t.spectrum.size != IN) return@mapNotNull null
+                if (t.spectrum.size != IN || isSilent(t.spectrum)) return@mapNotNull null
                 when {
                     t.kept -> Sample(features(t.spectrum), t.proposedGainsMb, 1f)
                     t.finalGainsMb != null -> Sample(features(t.spectrum), t.finalGainsMb, REVERTED_WEIGHT)
