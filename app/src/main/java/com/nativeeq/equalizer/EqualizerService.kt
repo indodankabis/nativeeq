@@ -97,12 +97,18 @@ class EqualizerService : Service() {
             private set
 
         private var instanceRef = WeakReference<EqualizerService>(null)
-        private val controlSessions = HashSet<Int>()
+        // Senders of EQ control broadcasts can't be verified (by protocol design), so
+        // bound how many DPs a misbehaving app can make us hold; oldest drops first.
+        private const val MAX_CONTROL_SESSIONS = 16
+        private val controlSessions = LinkedHashSet<Int>()
 
         /** From [SessionControlReceiver] or the service's runtime receiver. */
         fun onControlSession(session: Int, open: Boolean) {
             val changed = synchronized(controlSessions) {
                 val c = if (open) controlSessions.add(session) else controlSessions.remove(session)
+                while (controlSessions.size > MAX_CONTROL_SESSIONS) {
+                    controlSessions.remove(controlSessions.first())
+                }
                 PerfStats.controlSessions = controlSessions.size
                 c
             }
