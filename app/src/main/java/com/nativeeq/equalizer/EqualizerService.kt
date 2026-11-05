@@ -926,6 +926,12 @@ class EqualizerService : Service() {
                 controlReceiverRegistered = false
             }
             if (instanceRef.get() === this) instanceRef = WeakReference(null)
+            // CLOSE broadcasts are missed while no service is registered; don't
+            // resurrect possibly-dead sessions in the next instance.
+            synchronized(controlSessions) {
+                controlSessions.clear()
+                PerfStats.controlSessions = 0
+            }
             morphHandler.removeCallbacks(morphRunnable)
             morphHandler.removeCallbacks(dumpsysReconcile)
             dspThread.quitSafely()
