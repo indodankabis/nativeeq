@@ -15,6 +15,12 @@
             </intent-filter>
         </activity>
         <service android:exported="false" android:foregroundServiceType="mediaPlayback" android:name=".EqualizerService"/>
+        <receiver android:exported="true" android:name=".SessionControlReceiver">
+            <intent-filter>
+                <action android:name="android.media.action.OPEN_AUDIO_EFFECT_CONTROL_SESSION"/>
+                <action android:name="android.media.action.CLOSE_AUDIO_EFFECT_CONTROL_SESSION"/>
+            </intent-filter>
+        </receiver>
         <service android:exported="true" android:icon="@android:drawable/ic_lock_silent_mode_off" android:label="EQ 4-Bit" android:name=".EqTileService" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE"/>

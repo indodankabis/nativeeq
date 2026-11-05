@@ -175,6 +175,34 @@ class EqUiHolders(context: Context) {
     val heatmapBtn = Button(context)
     val clearDbBtn = Button(context)
     val exportDatasetBtn = Button(context)
+    val tasteBtn = Button(context)
+    val perfHudLabel = TextView(context).apply {
+        textSize = 10f
+        setTextColor(Color.parseColor("#22d3ee"))
+        typeface = Typeface.MONOSPACE
+        text = "PERF: sampling…"
+        setPadding(0, 0, 0, dp(8f))
+    }
+    val headphoneLabel = TextView(context).apply {
+        textSize = 12f
+        setTextColor(Color.parseColor("#f472b6"))
+        typeface = Typeface.MONOSPACE
+        text = "HEADPHONE EQ: no headphones detected"
+        setPadding(0, dp(4f), 0, dp(4f))
+    }
+    val headphoneInput = EditText(context).apply {
+        hint = "Headphone model, e.g. 'WH-1000XM4'"
+        setHintTextColor(Color.parseColor("#64748b"))
+        setTextColor(Color.parseColor("#f472b6"))
+        textSize = 12f
+        typeface = Typeface.MONOSPACE
+        background = roundRect("#04070a", 12f)
+        setPadding(dp(14f), 0, dp(14f), 0)
+        setSingleLine(true)
+    }
+    val headphoneMatchBtn = Button(context)
+    val headphoneAutoBtn = Button(context)
+    val headphoneOffBtn = Button(context)
     val advisorResultLabel = TextView(context).apply {
         textSize = 12f
         setTextColor(Color.parseColor("#facc15"))
@@ -296,6 +324,44 @@ class EqUiHolders(context: Context) {
         root.addView(drawerToggle)
 
         drawerLayout.addView(dbStatsLabel)
+        drawerLayout.addView(perfHudLabel)
+
+        drawerLayout.addView(headphoneLabel)
+        val hpRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            weightSum = 4f
+            setPadding(0, dp(4f), 0, dp(4f))
+        }
+        headphoneInput.layoutParams = LinearLayout.LayoutParams(0, dp(52f), 3.1f).apply {
+            setMargins(0, 0, dp(6f), 0)
+        }
+        headphoneMatchBtn.apply {
+            layoutParams = LinearLayout.LayoutParams(0, dp(52f), 0.9f)
+            text = "Match"
+        }.style("#f472b6", Color.BLACK, 13f)
+        hpRow.addView(headphoneInput)
+        hpRow.addView(headphoneMatchBtn)
+        drawerLayout.addView(hpRow)
+        val hpModeRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            weightSum = 2f
+            setPadding(0, 0, 0, dp(10f))
+        }
+        headphoneAutoBtn.apply {
+            layoutParams = LinearLayout.LayoutParams(0, dp(44f), 1f).apply {
+                setMargins(0, 0, dp(4f), 0)
+            }
+            text = "Auto-detect"
+        }.style("#1e293b", Color.parseColor("#f472b6"), 13f)
+        headphoneOffBtn.apply {
+            layoutParams = LinearLayout.LayoutParams(0, dp(44f), 1f).apply {
+                setMargins(dp(4f), 0, 0, 0)
+            }
+            text = "Correction off"
+        }.style("#1e293b", Color.parseColor("#94a3b8"), 13f)
+        hpModeRow.addView(headphoneAutoBtn)
+        hpModeRow.addView(headphoneOffBtn)
+        drawerLayout.addView(hpModeRow)
         drawerLayout.addView(modelStatusLabel)
         modelBtn.apply {
             layoutParams = LinearLayout.LayoutParams(-1, dp(56f)).apply {
@@ -348,13 +414,26 @@ class EqUiHolders(context: Context) {
         advRow.addView(heatmapBtn)
         advRow.addView(clearDbBtn)
         drawerLayout.addView(advRow)
-        exportDatasetBtn.apply {
-            layoutParams = LinearLayout.LayoutParams(-1, dp(48f)).apply {
-                setMargins(0, 0, 0, dp(8f))
+        val dataRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            weightSum = 2f
+            setPadding(0, 0, 0, dp(8f))
+        }
+        tasteBtn.apply {
+            layoutParams = LinearLayout.LayoutParams(0, dp(48f), 0.8f).apply {
+                setMargins(0, 0, dp(4f), 0)
             }
-            text = "Export training dataset (JSON)"
+            text = "My taste"
+        }.style("#a78bfa", Color.BLACK, 13f)
+        exportDatasetBtn.apply {
+            layoutParams = LinearLayout.LayoutParams(0, dp(48f), 1.2f).apply {
+                setMargins(dp(4f), 0, 0, 0)
+            }
+            text = "Export dataset (JSON)"
         }.style("#1e293b", Color.parseColor("#a78bfa"), 13f)
-        drawerLayout.addView(exportDatasetBtn)
+        dataRow.addView(tasteBtn)
+        dataRow.addView(exportDatasetBtn)
+        drawerLayout.addView(dataRow)
         drawerLayout.addView(advisorResultLabel)
 
         applyRecBtn.apply {

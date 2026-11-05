@@ -61,3 +61,22 @@ corrections now drive the actual DynamicsProcessing chain.
 - `tuning_events` (DB v17) = training dataset: 24-band spectrum + proposed gains +
   kept/reverted label (TuningOutcomeTracker in TuningLogbook.kt). Drawer → Export
   writes `Android/data/com.nativeeq.equalizer/files/nativeeq_training.json`.
+
+## Flagship layer (perf HUD, EQ broadcasts, AutoEq, taste model)
+
+- `PerfStats` counters + `android.os.Trace` sections (`eq.morph`, `eq.fft`,
+  `eq.reconcile`) — drawer shows JNI writes/s, morph fps, FFT cost, wakeups,
+  session attach latency. Record a Perfetto trace with the `atrace` app
+  category to see the sections.
+- Session sources, unioned in `reconcileSessions`: `ACTION_OPEN/CLOSE_AUDIO_EFFECT_CONTROL_SESSION`
+  (`SessionControlReceiver`, runtime-registered in the service for implicit
+  broadcasts + manifest for targeted ones) ∪ playback callback ∪ DUMP fallback.
+- Headphone correction lives in the DP **postEq** stage (32 log bands
+  20Hz–20kHz), separate from the user's 5-band preEq. If the device rejects a
+  postEq config, the chain falls back to the old preEq-only layout.
+  Data: `assets/autoeq_posteq.bin`, regenerate with `tools/build_autoeq.py`
+  (AutoEq, MIT — `assets/autoeq_LICENSE.txt`). Route keys come from
+  `AudioDeviceCallback`: `bt:<name>`, `usb:<name>`, `wired`, `dev_internal`.
+  Per-route manual pin/off in SharedPreferences `headphone_correction`.
+- `TasteModel`: ridge regression spectrum(24) → 5 gains on `tuning_events`
+  (kept → proposed, reverted → final gains); "My taste" button, tier `personal`.

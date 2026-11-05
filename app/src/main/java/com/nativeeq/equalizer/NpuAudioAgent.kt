@@ -118,6 +118,7 @@ class NpuAudioAgent(private val context: Context) {
                         accSamples++
                     }
                     tickCount++
+                    PerfStats.agentTicks.incrementAndGet()
                     var statusHeadline = "NPU LOOP: OBSERVING STREAM"
                     var logLine = ""
                     if (tickCount % 15 == 0) {
