@@ -35,6 +35,7 @@ class TelemetryDbHelper(context: Context) :
         val limiterPregainDb: Float,
         val outcome: String,
         val finalGainsMb: FloatArray?,
+        val appliedAt: Long? = null,
     ) {
         val kept: Boolean get() = outcome == OUTCOME_KEPT
     }
@@ -303,7 +304,7 @@ class TelemetryDbHelper(context: Context) :
             "SELECT id, timestamp, route, source_tier, spectrum, " +
                 "proposed_g0, proposed_g1, proposed_g2, proposed_g3, proposed_g4, " +
                 "limiter_pregain, outcome, " +
-                "final_g0, final_g1, final_g2, final_g3, final_g4 " +
+                "final_g0, final_g1, final_g2, final_g3, final_g4, applied_at " +
                 "FROM tuning_events WHERE outcome != ? ORDER BY id DESC" +
                 (if (limit != null) " LIMIT $limit" else ""),
             arrayOf(OUTCOME_PENDING)
@@ -319,6 +320,7 @@ class TelemetryDbHelper(context: Context) :
         limiterPregainDb = c.getFloat(10),
         outcome = c.getString(11) ?: "",
         finalGainsMb = if (c.isNull(12)) null else FloatArray(5) { c.getFloat(12 + it) },
+        appliedAt = if (c.isNull(17)) null else c.getLong(17),
     )
 
     /** Resolved (kept/reverted) rows, newest first. */

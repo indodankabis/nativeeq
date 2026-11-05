@@ -48,7 +48,8 @@ class TasteModel private constructor(
                 if (t.spectrum.size != IN || isSilent(t.spectrum)) return@mapNotNull null
                 when {
                     t.kept -> Sample(features(t.spectrum), t.proposedGainsMb, 1f)
-                    t.finalGainsMb != null -> Sample(features(t.spectrum), t.finalGainsMb, REVERTED_WEIGHT)
+                    // A never-applied proposal's "final" gains are just whatever replaced it.
+                    t.finalGainsMb != null && t.appliedAt != null -> Sample(features(t.spectrum), t.finalGainsMb, REVERTED_WEIGHT)
                     else -> null
                 }
             }
