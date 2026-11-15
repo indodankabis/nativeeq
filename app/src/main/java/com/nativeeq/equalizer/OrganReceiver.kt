@@ -64,6 +64,16 @@ class OrganReceiver : BroadcastReceiver() {
                              intent.getShortExtra("virt", 0))
                 applied.put("virt", intent.getShortExtra("virt", 0))
             }
+            cmd == "say" && !intent.getStringExtra("say").isNullOrBlank() -> {
+                svc.action = EqualizerService.ACTION_SAY
+                svc.putExtra(EqualizerService.EXTRA_SAY,
+                             intent.getStringExtra("say"))
+                svc.putExtra(EqualizerService.EXTRA_PITCH,
+                             intent.getFloatExtra("pitch", 1.0f))
+                svc.putExtra(EqualizerService.EXTRA_RATE,
+                             intent.getFloatExtra("rate", 1.0f))
+                applied.put("say", intent.getStringExtra("say"))
+            }
             cmd == "stop" -> {
                 context.stopService(Intent(context, EqualizerService::class.java))
                 writeState(context, JSONObject().put("stopped", true)

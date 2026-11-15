@@ -45,7 +45,11 @@ class EqualizerService : Service() {
         const val ACTION_APPLY_NPU_CORRECTION =
             "com.nativeeq.equalizer.ACTION_APPLY_NPU_CORRECTION"
         const val ACTION_STATE_CHANGED = "com.nativeeq.equalizer.ACTION_STATE_CHANGED"
+        const val ACTION_SAY = "com.nativeeq.equalizer.ACTION_SAY"
         const val EXTRA_STATE = "com.nativeeq.equalizer.EXTRA_STATE"
+        const val EXTRA_SAY = "com.nativeeq.equalizer.EXTRA_SAY"
+        const val EXTRA_PITCH = "com.nativeeq.equalizer.EXTRA_PITCH"
+        const val EXTRA_RATE = "com.nativeeq.equalizer.EXTRA_RATE"
         const val EXTRA_ROUTE_KEY = "com.nativeeq.equalizer.EXTRA_ROUTE_KEY"
         const val EXTRA_BASS_STRENGTH = "com.nativeeq.equalizer.EXTRA_BASS_STRENGTH"
         const val EXTRA_VIRT_STRENGTH = "com.nativeeq.equalizer.EXTRA_VIRT_STRENGTH"
@@ -776,8 +780,46 @@ class EqualizerService : Service() {
                 currentState = state
                 if (state in 0..15) setTargetGains(profiles[state])
             }
+            ACTION_SAY -> {
+                val text = intent.getStringExtra(EXTRA_SAY)
+                if (!text.isNullOrBlank()) {
+                    val pitch = intent.getFloatExtra(EXTRA_PITCH, 1.0f)
+                        .coerceIn(0.5f, 2.0f)
+                    val rate = intent.getFloatExtra(EXTRA_RATE, 1.0f)
+                        .coerceIn(0.5f, 2.0f)
+                    organSay(text, pitch, rate)
+                }
+            }
         }
         return START_STICKY
+    }
+
+    /** The organism's mouth: speaks through the app's own media session,
+     *  so the voice itself rides the DSP chain the organism tunes. TTS
+     *  init is async — queue the first utterance until the engine binds. */
+    private var organTts: android.speech.tts.TextToSpeech? = null
+    private var organTtsReady = false
+    private var organSayPending: Triple<String, Float, Float>? = null
+
+    private fun organSay(text: String, pitch: Float, rate: Float) {
+        val t = organTts
+        if (t == null || !organTtsReady) {
+            organSayPending = Triple(text, pitch, rate)
+            if (t == null) {
+                organTts = android.speech.tts.TextToSpeech(this) { st ->
+                    organTtsReady = st == android.speech.tts.TextToSpeech.SUCCESS
+                    organSayPending?.let { (x, p, r) ->
+                        organSayPending = null
+                        if (organTtsReady) organSay(x, p, r)
+                    }
+                }
+            }
+            return
+        }
+        t.setPitch(pitch)
+        t.setSpeechRate(rate)
+        t.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH,
+                null, "organ-say")
     }
 
     fun setTargetGains(targets: FloatArray, immediate: Boolean = false) {
@@ -909,6 +951,8 @@ class EqualizerService : Service() {
     }
 
     override fun onDestroy() {
+        try { organTts?.shutdown() } catch (_: Exception) {}
+        organTts = null
         super.onDestroy()
         try {
             if (playbackCallbackRegistered) {
