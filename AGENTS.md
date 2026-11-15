@@ -51,4 +51,32 @@ corrections now drive the actual DynamicsProcessing chain.
 - Visualizer created once (was re-created every morph tick).
 - SWEEP CAL button wired (AcousticSweeper was dead code in v43).
 - EQ graph drag/bypass listeners wired (were dead hooks in v43).
-- Per-session DP attach needs `pm grant com.nativeeq.equalizer android.permission.DUMP`.
+- Per-session DP attach is event-driven (`AudioPlaybackCallback`, session ids via
+  reflective `getSessionId()`/`getPlayerState()` — @SystemApi but sdk-listed).
+  Unprivileged apps get anonymized configs (sessionId 0, needs MODIFY_AUDIO_ROUTING),
+  so when DUMP is granted (`pm grant com.nativeeq.equalizer android.permission.DUMP`)
+  each callback event does one `dumpsys audio` read — no polling.
+- DP writes are dirty-tracked per DP; morph targets snap to a 50mB grid, limiter
+  to 0.1dB, so steady state issues zero JNI writes.
+- `tuning_events` (DB v17) = training dataset: 24-band spectrum + proposed gains +
+  kept/reverted label (TuningOutcomeTracker in TuningLogbook.kt). Drawer → Export
+  writes `Android/data/com.nativeeq.equalizer/files/nativeeq_training.json`.
+
+## Flagship layer (perf HUD, EQ broadcasts, AutoEq, taste model)
+
+- `PerfStats` counters + `android.os.Trace` sections (`eq.morph`, `eq.fft`,
+  `eq.reconcile`) — drawer shows JNI writes/s, morph fps, FFT cost, wakeups,
+  session attach latency. Record a Perfetto trace with the `atrace` app
+  category to see the sections.
+- Session sources, unioned in `reconcileSessions`: `ACTION_OPEN/CLOSE_AUDIO_EFFECT_CONTROL_SESSION`
+  (`SessionControlReceiver`, runtime-registered in the service for implicit
+  broadcasts + manifest for targeted ones) ∪ playback callback ∪ DUMP fallback.
+- Headphone correction lives in the DP **postEq** stage (32 log bands
+  20Hz–20kHz), separate from the user's 5-band preEq. If the device rejects a
+  postEq config, the chain falls back to the old preEq-only layout.
+  Data: `assets/autoeq_posteq.bin`, regenerate with `tools/build_autoeq.py`
+  (AutoEq, MIT — `assets/autoeq_LICENSE.txt`). Route keys come from
+  `AudioDeviceCallback`: `bt:<name>`, `usb:<name>`, `wired`, `dev_internal`.
+  Per-route manual pin/off in SharedPreferences `headphone_correction`.
+- `TasteModel`: ridge regression spectrum(24) → 5 gains on `tuning_events`
+  (kept → proposed, reverted → final gains); "My taste" button, tier `personal`.

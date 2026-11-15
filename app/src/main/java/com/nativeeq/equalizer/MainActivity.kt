@@ -22,6 +22,7 @@ class MainActivity : Activity() {
     private lateinit var dbHelper: TelemetryDbHelper
     private lateinit var lmEngine: LiteRtLmAcousticEngine
     private lateinit var logbook: TuningLogbook
+    private lateinit var outcomeTracker: TuningOutcomeTracker
     private var eqService: EqualizerService? = null
     private var npuAgent: NpuAudioAgent? = null
     private val micAnalyzer = RoomMicAnalyzer()
@@ -41,6 +42,23 @@ class MainActivity : Activity() {
     private var lastTelemetryUiMs = 0L
     private var lastMicUiMs = 0L
     private var lastAgentUiMs = 0L
+    private var uiVisible = false
+    private var pendingRecommendationEventId = -1L
+    private var recommendedTier = "heuristic"
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val perfHudRunnable = object : Runnable {
+        override fun run() {
+            ui.perfHudLabel.text = PerfStats.summary()
+            refreshHeadphoneLabel()
+            if (uiVisible) mainHandler.postDelayed(this, 1000L)
+        }
+    }
+    private val dragSettleRunnable = Runnable {
+        outcomeTracker.propose(
+            currentRoute, "user", npuAgent?.latestSpectrum(),
+            ui.visualizerView.getTargetGains(), applyNow = true
+        )
+    }
 
     private val terminalLines = LinkedList<String>()
     private val maxLogLines = 9
@@ -50,6 +68,7 @@ class MainActivity : Activity() {
             val binder = service as? EqualizerService.LocalBinder ?: return
             eqService = binder.getService()
             isBound = true
+            currentRoute = EqualizerService.currentRouteKey
             renderState(EqualizerService.currentState)
             val floats = dbHelper.getRouteProfile(currentRoute)
             if (floats != null) {
@@ -93,10 +112,15 @@ class MainActivity : Activity() {
                     }
                 }
             }
+            EqualizerService.onSpectrumListener = { spectrum ->
+                npuAgent?.pushSpectrum(spectrum)
+            }
+            updateCaptureDemand()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             EqualizerService.onTelemetryListener = null
+            EqualizerService.onSpectrumListener = null
             eqService = null
             isBound = false
         }
@@ -106,10 +130,13 @@ class MainActivity : Activity() {
         override fun onReceive(context: Context, intent: Intent) {
             val state =
                 intent.getIntExtra(EqualizerService.EXTRA_STATE, EqualizerService.currentState)
-            currentRoute =
-                intent.getStringExtra(EqualizerService.EXTRA_ROUTE_KEY) ?: "dev_internal"
+            val route = intent.getStringExtra(EqualizerService.EXTRA_ROUTE_KEY)
+                ?: EqualizerService.currentRouteKey
+            val routeChanged = route != currentRoute
+            currentRoute = route
             ui.statusLabel.text = "60FPS MORPH ENGINE ACTIVE | ROUTE: $currentRoute"
             renderState(state)
+            if (routeChanged) onRouteChanged()
         }
     }
 
@@ -120,6 +147,14 @@ class MainActivity : Activity() {
         dbHelper = TelemetryDbHelper(this)
         lmEngine = LiteRtLmAcousticEngine(this)
         logbook = TuningLogbook(this)
+        outcomeTracker = TuningOutcomeTracker(
+            dbHelper, logbook,
+            currentGains = {
+                eqService?.targetGainsMb?.let { g -> ShortArray(g.size) { g[it].toInt().toShort() } }
+                    ?: ui.visualizerView.getTargetGains()
+            },
+            onResolved = { updateDbStats() },
+        )
         npuAgent = NpuAudioAgent(this).apply {
             onTelemetryListener = { gains, msg, logLine, low, med, high -> onAgentTick(gains, msg, logLine, low, med, high) }
         }
@@ -173,6 +208,7 @@ class MainActivity : Activity() {
                 ui.npuToggleBtn,
                 if (isNpuAutoMode) "#0284c7" else "#1e293b", Color.WHITE
             )
+            updateCaptureDemand()
         }
         ui.resetBtn.setOnClickListener {
             it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
@@ -222,6 +258,30 @@ class MainActivity : Activity() {
             ui.advisorResultLabel.text = "DATABASE PURGED."
             ui.applyRecBtn.visibility = View.GONE
         }
+        ui.exportDatasetBtn.setOnClickListener {
+            it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+            exportTrainingDataset()
+        }
+        ui.tasteBtn.setOnClickListener {
+            it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+            runTasteModel()
+        }
+        ui.headphoneMatchBtn.setOnClickListener {
+            it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+            matchHeadphone(ui.headphoneInput.text.toString())
+        }
+        ui.headphoneAutoBtn.setOnClickListener {
+            it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+            eqService?.clearHeadphoneOverride()
+            appendLog("[AUTOEQ] auto-detect for $currentRoute")
+            mainHandler.postDelayed({ refreshHeadphoneLabel() }, 300L)
+        }
+        ui.headphoneOffBtn.setOnClickListener {
+            it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+            eqService?.setHeadphoneModel(null)
+            appendLog("[AUTOEQ] correction off for $currentRoute")
+            mainHandler.postDelayed({ refreshHeadphoneLabel() }, 300L)
+        }
         ui.applyRecBtn.setOnClickListener {
             it.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
             applyRecommendation()
@@ -239,11 +299,15 @@ class MainActivity : Activity() {
             val gains = ui.visualizerView.getTargetGains()
             eqService?.setTargetGains(gains, immediate = true)
             hasCustomCurve = true
+            outcomeTracker.onUserGainChange()
+            mainHandler.removeCallbacks(dragSettleRunnable)
+            mainHandler.postDelayed(dragSettleRunnable, 1200L)
             ui.advisorResultLabel.text =
                 "BAND ${arrayOf("60Hz", "230Hz", "910Hz", "3.6k", "14k")[band]} -> " +
                     "%+.1fdB".format(Locale.US, gainMb / 100f)
         }
         ui.visualizerView.onBypassToggleListener = { bypassed ->
+            outcomeTracker.onBypass(bypassed)
             if (bypassed) {
                 eqService?.setTargetGains(FloatArray(5), immediate = true)
                 appendLog("[A/B] DSP bypassed — flat reference")
@@ -346,6 +410,11 @@ class MainActivity : Activity() {
                         resp.targetGains.clone()
                     ui.visualizerView.setTargetGains(resp.targetGains)
                     eqService?.setTargetGains(resp.targetGains)
+                    outcomeTracker.propose(
+                        currentRoute,
+                        TuningOutcomeTracker.tierForBackendTag(resp.backendTag),
+                        npuAgent?.latestSpectrum(), resp.targetGains, applyNow = true
+                    )
                     dbHelper.saveRouteProfile(
                         currentRoute,
                         FloatArray(5) { resp.targetGains[it].toFloat() }, 0f
@@ -433,8 +502,132 @@ class MainActivity : Activity() {
     }
 
     private fun updateDbStats() {
+        val ev = try {
+            dbHelper.getTuningEventCounts()
+        } catch (_: Exception) {
+            TelemetryDbHelper.TuningEventCounts(0, 0, 0)
+        }
         ui.dbStatsLabel.text =
-            "SQLITE (eq_telemetry.db): ${dbHelper.getTotalRowCount()} snapshots indexed."
+            "SQLITE (eq_telemetry.db): ${dbHelper.getTotalRowCount()} snapshots indexed.\n" +
+                "DATASET: ${ev.total} tuning events " +
+                "(${ev.kept} kept / ${ev.reverted} reverted / ${ev.pending} pending)"
+    }
+
+    private fun exportTrainingDataset() {
+        val dir = getExternalFilesDir(null) ?: filesDir
+        val file = java.io.File(dir, "nativeeq_training.json")
+        Thread {
+            val result = try {
+                "[DATASET] ${dbHelper.exportTrainingJson(file)} tuples -> ${file.absolutePath}"
+            } catch (e: Exception) {
+                "[DATASET] export failed: ${e.message?.take(60)}"
+            }
+            runOnUiThread {
+                appendLog(result)
+                ui.advisorResultLabel.text = result
+                updateDbStats()
+            }
+        }.start()
+    }
+
+    /** Route switched (headphones in/out): bring up that route's saved curve, if any. */
+    private fun onRouteChanged() {
+        appendLog("[ROUTE] -> $currentRoute")
+        val svc = eqService
+        val saved = svc?.loadCustomRouteCurve(currentRoute)
+        if (saved != null) {
+            hasCustomCurve = true
+            ui.visualizerView.setTargetGains(saved)
+            appendLog("[SQLITE] Loaded saved curve for $currentRoute")
+        } else if (svc != null) {
+            // No profile for this route: the current curve keeps playing, so show
+            // it (renderState above may have drawn the preset instead of it).
+            val g = svc.targetGainsMb
+            ui.visualizerView.setTargetGains(ShortArray(g.size) { g[it].toInt().toShort() })
+        }
+        refreshHeadphoneLabel()
+    }
+
+    private fun refreshHeadphoneLabel() {
+        val svc = eqService
+        ui.headphoneLabel.text = when {
+            svc == null -> "HEADPHONE EQ: engine offline"
+            !svc.headphoneCorrectionAvailable -> "HEADPHONE EQ: unsupported on this device"
+            else -> EqualizerService.headphoneLabel?.let { "HEADPHONE EQ: $it" }
+                ?: "HEADPHONE EQ: off | ROUTE: $currentRoute"
+        }
+    }
+
+    private fun matchHeadphone(query: String) {
+        val svc = eqService ?: return
+        if (query.isBlank()) {
+            ui.advisorResultLabel.text = "Type a headphone model to match (AutoEq database)."
+            return
+        }
+        Thread {
+            val matches = svc.autoEq?.search(query, 4).orEmpty()
+            runOnUiThread {
+                val best = matches.firstOrNull()
+                if (best == null) {
+                    ui.advisorResultLabel.text = "[AUTOEQ] no match for '$query'"
+                    return@runOnUiThread
+                }
+                svc.setHeadphoneModel(best.entry.name)
+                ui.advisorResultLabel.text = "[AUTOEQ] ${best.entry.name} (${best.entry.type}) " +
+                    "pinned to $currentRoute\nalso: " +
+                    matches.drop(1).joinToString(" · ") { m -> m.entry.name }
+                appendLog("[AUTOEQ] ${best.entry.name} -> postEq ${EqualizerService.POST_EQ_BANDS} bands")
+                mainHandler.postDelayed({ refreshHeadphoneLabel() }, 300L)
+            }
+        }.start()
+    }
+
+    /** Surprise tier: ridge regression fit on this user's kept/reverted tuning events. */
+    private fun runTasteModel() {
+        val spectrum = npuAgent?.latestSpectrum()
+        if (spectrum == null || TasteModel.isSilent(spectrum)) {
+            ui.advisorResultLabel.text = "MY TASTE: play some music first (needs live spectrum)."
+            return
+        }
+        ui.advisorResultLabel.text = "MY TASTE: fitting on-device…"
+        Thread {
+            val t0 = System.nanoTime()
+            val tuples = try {
+                dbHelper.getTrainingTuples(5000)
+            } catch (_: Exception) {
+                emptyList()
+            }
+            val model = TasteModel.fit(tuples)
+            val ms = (System.nanoTime() - t0) / 1e6
+            runOnUiThread {
+                if (model == null) {
+                    val usable = TasteModel.samplesFrom(tuples).size
+                    ui.advisorResultLabel.text = "MY TASTE: need ${TasteModel.MIN_SAMPLES} labeled " +
+                        "events with spectrum, have $usable. Keep or tweak a few tunes first."
+                    return@runOnUiThread
+                }
+                val gains = model.predict(spectrum)
+                recommendedGains = gains
+                recommendedState = -1
+                recommendedTier = "personal"
+                pendingRecommendationEventId = outcomeTracker.propose(
+                    currentRoute, recommendedTier, spectrum, gains, applyNow = false
+                )
+                ui.advisorResultLabel.text = String.format(
+                    Locale.US,
+                    "[PERSONAL] fit on %d events in %.1fms · rmse %.2fdB (avg-curve %.2fdB)\n%s",
+                    model.samples, ms, model.fitRmseDb, model.baselineRmseDb,
+                    gains.joinToString(" ") { g -> "%+.1f".format(Locale.US, g / 100f) }
+                )
+                ui.applyRecBtn.visibility = View.VISIBLE
+            }
+        }.start()
+    }
+
+    /** Visualizer runs only while the UI is visible or Auto (closed loop) is on. */
+    private fun updateCaptureDemand() {
+        eqService?.setCaptureDemand(uiVisible, isNpuAutoMode)
+        if (!uiVisible && !isNpuAutoMode) npuAgent?.pushSpectralFrame(0f, 0f, 0f)
     }
 
     private fun refreshModelStatus() {
@@ -460,6 +653,11 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     recommendedState = resp.recommendedState
                     recommendedGains = resp.targetGains
+                    recommendedTier = TuningOutcomeTracker.tierForBackendTag(resp.backendTag)
+                    pendingRecommendationEventId = outcomeTracker.propose(
+                        currentRoute, recommendedTier,
+                        npuAgent?.latestSpectrum(), resp.targetGains, applyNow = false
+                    )
                     ui.advisorResultLabel.text =
                         "[${resp.backendTag}] ${resp.reasoning}"
                     ui.applyRecBtn.visibility = View.VISIBLE
@@ -484,11 +682,31 @@ class MainActivity : Activity() {
                     ui.advisorResultLabel.text.toString()
                 )
                 appendLog("[APPLY] Advisor gains -> DSP chain")
+                markRecommendationApplied(gains)
             }
-            recommendedState != -1 ->
-                setHardwareState(recommendedState, ui.advisorResultLabel.text.toString())
+            recommendedState != -1 -> {
+                setHardwareState(
+                    recommendedState, ui.advisorResultLabel.text.toString(), trackAsUser = false
+                )
+                markRecommendationApplied(
+                    EqualizerService.profiles.getOrNull(recommendedState.coerceIn(0, 15))
+                        ?: ShortArray(5)
+                )
+            }
         }
         ui.applyRecBtn.visibility = View.GONE
+    }
+
+    /** Label the event whose gains were actually applied; a superseded one gets a fresh row. */
+    private fun markRecommendationApplied(gains: ShortArray) {
+        if (outcomeTracker.isPending(pendingRecommendationEventId)) {
+            outcomeTracker.markApplied(pendingRecommendationEventId)
+        } else {
+            pendingRecommendationEventId = outcomeTracker.propose(
+                currentRoute, recommendedTier, npuAgent?.latestSpectrum(),
+                gains.clone(), applyNow = true
+            )
+        }
     }
 
     private fun appendLog(line: String) {
@@ -531,7 +749,11 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun setHardwareState(state: Int, reason: String = "Manual 4-bit register selection") {
+    private fun setHardwareState(
+        state: Int,
+        reason: String = "Manual 4-bit register selection",
+        trackAsUser: Boolean = true,
+    ) {
         hasCustomCurve = false
         val safe = state.coerceIn(0, 15)
         val presetFloats = FloatArray(5) { EqualizerService.profiles[safe][it].toFloat() }
@@ -539,6 +761,12 @@ class MainActivity : Activity() {
         val name = EqualizerService.profileNames.getOrNull(safe) ?: "Preset $safe"
         val gains = EqualizerService.profiles.getOrNull(safe) ?: ShortArray(5)
         logbook.recordEntry(currentRoute, name, gains, reason)
+        if (trackAsUser) {
+            mainHandler.removeCallbacks(dragSettleRunnable)
+            outcomeTracker.propose(
+                currentRoute, "user", npuAgent?.latestSpectrum(), gains.clone(), applyNow = true
+            )
+        }
         startService(
             Intent(this, EqualizerService::class.java).apply {
                 action = EqualizerService.ACTION_SET_STATE
@@ -573,6 +801,11 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        uiVisible = true
+        updateCaptureDemand()
+        updateDbStats()
+        mainHandler.removeCallbacks(perfHudRunnable)
+        mainHandler.post(perfHudRunnable)
         ui.matrixVisualizer.isPaused = false
         ui.matrixVisualizer.postInvalidateOnAnimation()
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == 0) {
@@ -588,6 +821,9 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        uiVisible = false
+        updateCaptureDemand()
+        mainHandler.removeCallbacks(perfHudRunnable)
         ui.matrixVisualizer.isPaused = true
         micAnalyzer.stop()
         unregisterReceiver(receiver)
@@ -595,8 +831,13 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacks(dragSettleRunnable)
+        mainHandler.removeCallbacks(perfHudRunnable)
+        if (::outcomeTracker.isInitialized) outcomeTracker.release()
         if (isBound) {
+            eqService?.setCaptureDemand(uiVisible = false, agentActive = false)
             EqualizerService.onTelemetryListener = null
+            EqualizerService.onSpectrumListener = null
             unbindService(connection)
             isBound = false
         }
