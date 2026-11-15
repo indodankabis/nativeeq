@@ -14,13 +14,28 @@ import java.io.File
  *   am broadcast -a com.nativeeq.equalizer.ORGAN --es bass 800
  *   am broadcast -a com.nativeeq.equalizer.ORGAN --es cmd stop
  *
- * Forwards onto EqualizerService's existing intent API (broadcast receipt
- * carries the foreground-service-start exemption, so this works from
- * termux/abd while the app is backgrounded). What we last applied lands in
+ * Forwards onto EqualizerService's existing intent API. On A14+ a custom
+ * broadcast can't exempt startForegroundService, so we try it and fall
+ * back to a plain start (works while the DSP service is resident — the
+ * EQ's normal state once armed). Every attempt lands in
  * filesDir/organ_state.json — adb/cat-readable for mesh telemetry.
  */
 class OrganReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        try {
+            onReceiveSafe(context, intent)
+        } catch (t: Throwable) {
+            // receivers must never crash — the system kills repeat offenders
+            try {
+                writeState(context, JSONObject()
+                    .put("error", t.javaClass.simpleName)
+                    .put("ts", System.currentTimeMillis()))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun onReceiveSafe(context: Context, intent: Intent) {
         val cmd = intent.getStringExtra("cmd") ?: "apply"
         val state = intent.getIntExtra("state", -1)
         val gains = intent.getFloatArrayExtra("gains")
@@ -61,9 +76,23 @@ class OrganReceiver : BroadcastReceiver() {
                 return
             }
         }
-        context.startForegroundService(svc)
+        // A14+ custom broadcasts don't exempt startForegroundService — try
+        // it, fall back to a plain start (works when the DSP service is
+        // already resident — the EQ's normal state once armed), and never
+        // let a throw crash a receiver. 'via' records which path spoke.
+        var via = "fgs"
+        try {
+            context.startForegroundService(svc)
+        } catch (e: Exception) {
+            via = try {
+                context.startService(svc)
+                "bg"
+            } catch (e2: Exception) {
+                "asleep:" + e2.javaClass.simpleName
+            }
+        }
         writeState(context, applied.put("ts", System.currentTimeMillis())
-            .put("cmd", cmd).put("state", state))
+            .put("cmd", cmd).put("state", state).put("via", via))
     }
 
     private fun writeState(context: Context, o: JSONObject) {
